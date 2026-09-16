@@ -35,6 +35,12 @@ struct Candidate {
     source: Source,
     /// Explicitly requested: warn if it doesn't exist.
     explicit: bool,
+    /// If true, `CLAUDE_CONFIG_DIR` is set to the source's *canonical*
+    /// config dir once resolved, rather than whatever (possibly relative or
+    /// `..`-containing) path was given. The launcher chdirs into the
+    /// session's cwd before exec, so an unresolved value would point at the
+    /// wrong directory.
+    needs_config_dir_env: bool,
 }
 
 fn basename(p: &Path) -> String {
@@ -43,10 +49,13 @@ fn basename(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-fn claude_with_dir(dir: &Path) -> LaunchSpec {
+/// `claude` launched with no env changes yet; the caller marks
+/// `needs_config_dir_env` so the dedupe loop fills in `CLAUDE_CONFIG_DIR`
+/// from the canonicalized `config_dir`.
+fn bare_claude() -> LaunchSpec {
     LaunchSpec {
         argv_prefix: vec!["claude".into()],
-        env_set: vec![(ENV_CONFIG_DIR.into(), dir.display().to_string())],
+        env_set: vec![],
         env_remove: vec![],
     }
 }
@@ -99,6 +108,7 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
                     candidates.push(Candidate {
                         source: source(name, dir, launch),
                         explicit: true,
+                        needs_config_dir_env: false,
                     });
                 }
             }
@@ -109,10 +119,10 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
     if cfg.home {
         if let Some(dir) = settings.env_var(ENV_CONFIG_DIR) {
             let dir = settings.expand(dir);
-            let launch = claude_with_dir(&dir);
             candidates.push(Candidate {
-                source: source(basename(&dir), dir, launch),
+                source: source(basename(&dir), dir, bare_claude()),
                 explicit: true,
+                needs_config_dir_env: true,
             });
         }
         let launch = LaunchSpec {
@@ -123,30 +133,35 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
         candidates.push(Candidate {
             source: source("claude".into(), settings.home.join(".claude"), launch),
             explicit: false,
+            needs_config_dir_env: false,
         });
     }
 
     for sc in settings.file.sources.iter().filter(|s| s.agent == AGENT) {
         let dir = settings.expand(&sc.config_dir);
-        let launch = match &sc.command {
-            Some(argv) if !argv.is_empty() => LaunchSpec {
-                argv_prefix: argv.clone(),
-                ..Default::default()
-            },
-            _ => claude_with_dir(&dir),
+        let (launch, needs_config_dir_env) = match &sc.command {
+            Some(argv) if !argv.is_empty() => (
+                LaunchSpec {
+                    argv_prefix: argv.clone(),
+                    ..Default::default()
+                },
+                false,
+            ),
+            _ => (bare_claude(), true),
         };
         let name = sc.name.clone().unwrap_or_else(|| basename(&dir));
         candidates.push(Candidate {
             source: source(name, dir, launch),
             explicit: true,
+            needs_config_dir_env,
         });
     }
 
     for dir in &settings.cli_config_dirs {
-        let launch = claude_with_dir(dir);
         candidates.push(Candidate {
-            source: source(basename(dir), dir.clone(), launch),
+            source: source(basename(dir), dir.clone(), bare_claude()),
             explicit: true,
+            needs_config_dir_env: true,
         });
     }
 
@@ -154,10 +169,15 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
     for Candidate {
         mut source,
         explicit,
+        needs_config_dir_env,
     } in candidates
     {
         match std::fs::canonicalize(&source.config_dir) {
             Ok(canonical) if canonical.is_dir() => {
+                if needs_config_dir_env {
+                    source.launch.env_set =
+                        vec![(ENV_CONFIG_DIR.into(), canonical.display().to_string())];
+                }
                 if seen.insert(canonical.clone()) {
                     source.config_dir = canonical;
                     out.sources.push(source);
@@ -250,6 +270,30 @@ mod tests {
         assert_eq!(
             d.sources[0].launch.env_set,
             vec![(ENV_CONFIG_DIR.to_string(), dir.display().to_string())]
+        );
+    }
+
+    #[test]
+    fn non_canonical_env_dir_resolves_to_canonical_in_launch_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(tmp.path().join("a")).unwrap();
+        // Non-canonical: contains a `..` segment, same as a relative
+        // CLAUDE_CONFIG_DIR would be relative to the launcher's cwd rather
+        // than ccpick's. discover() must resolve it before building the
+        // launch env, not embed it verbatim.
+        let non_canonical = tmp.path().join("a/../real");
+        let mut s = settings(tmp.path());
+        s.env
+            .insert(ENV_CONFIG_DIR.into(), non_canonical.display().to_string());
+        let d = discover(&s).unwrap();
+        let canonical = fs::canonicalize(&real).unwrap();
+        assert_eq!(names(&d), vec!["real"]);
+        assert_eq!(d.sources[0].config_dir, canonical);
+        assert_eq!(
+            d.sources[0].launch.env_set,
+            vec![(ENV_CONFIG_DIR.to_string(), canonical.display().to_string())]
         );
     }
 

@@ -1,7 +1,7 @@
 //! Drawing the TUI from App state.
 use super::app::{App, Row};
 use crate::format::{relative, shorten_home};
-use crate::model::Role;
+use crate::model::{Message, Role};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -10,9 +10,6 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Parag
 use std::path::Path;
 
 const HELP: &str = " ↵ resume  ^A source  ^R running only  ^S sort  tab preview  esc quit";
-/// Header lines drawn above the message list in the preview pane (cwd/branch,
-/// msg count/id, separator).
-const PREVIEW_HEADER_LINES: usize = 3;
 
 pub fn highlight(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
     let needle = query.trim().to_ascii_lowercase();
@@ -151,13 +148,17 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
     let offset = app.preview_offset;
     let messages = app.preview_messages();
 
+    // Inner content width: pane width minus the 1-column padding on each
+    // side (shared by the header and message sub-areas below, since a
+    // vertical split keeps the same width).
+    let content_width = area.width.saturating_sub(2).max(1);
     let cwd = session
         .meta
         .cwd
         .as_deref()
         .map(|p| shorten_home(p, home))
         .unwrap_or_else(|| "?".into());
-    let mut lines = vec![
+    let header_lines = vec![
         Line::from(format!(
             "{cwd} · {} · {source_name}",
             session.meta.branch.as_deref().unwrap_or("-")
@@ -169,101 +170,143 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
             session.meta.id
         ))
         .dim(),
-        Line::from("─".repeat(area.width.saturating_sub(2) as usize)).dim(),
+        Line::from("─".repeat(content_width as usize)).dim(),
     ];
 
-    if !messages.is_empty() {
-        // Inner content width: pane width minus the 1-column padding on each side.
-        let content_width = area.width.saturating_sub(2) as usize;
-        // Rows available for messages: pane height minus the header lines above.
-        let available = (area.height as usize).saturating_sub(PREVIEW_HEADER_LINES);
-        let heights: Vec<usize> = messages
-            .iter()
-            .map(|m| message_height(&m.text, content_width))
-            .collect();
-        let last = messages.len() - 1;
-        // Default anchor keeps the newest message visible by walking backwards
-        // from the end; a text-search hit anchors at the hit instead.
-        let anchor = hit_index
-            .unwrap_or_else(|| tail_start(&heights, available))
-            .min(last) as isize;
-        let start = (anchor + offset).clamp(0, last as isize) as usize;
-        // Bound how many messages we build lines for, so an early hit in a long
-        // conversation doesn't render every message up to the end each frame.
-        let end = forward_end(&heights, start, available);
-
-        let label = format!("{}: ", session.meta.agent);
-        for message in &messages[start..end] {
-            let (name, color) = match message.role {
-                Role::User => ("you: ".to_string(), Color::Cyan),
-                Role::Assistant => (label.clone(), Color::Magenta),
-            };
-            for (i, text_line) in message.text.lines().enumerate() {
-                let mut spans = Vec::new();
-                if i == 0 {
-                    spans.push(Span::styled(
-                        name.clone(),
-                        Style::new().fg(color).add_modifier(Modifier::BOLD),
-                    ));
-                }
-                spans.extend(highlight(text_line, &query, Style::new()));
-                lines.push(Line::from(spans));
-            }
-            lines.push(Line::from(""));
-        }
-    }
+    // Measure the header's real rendered height (it can wrap too, e.g. a
+    // long cwd) rather than assuming a fixed row count, then give the
+    // message area whatever is left.
+    let header_height = Paragraph::new(header_lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(content_width) as u16;
+    let header_height = header_height.min(area.height);
+    let [header_area, message_area] =
+        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(area);
     frame.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(header_lines)
             .block(Block::default().padding(Padding::horizontal(1)))
             .wrap(Wrap { trim: false }),
-        area,
+        header_area,
+    );
+
+    if messages.is_empty() {
+        return;
+    }
+    let available = message_area.height as usize;
+    let last = messages.len() - 1;
+    let agent = session.meta.agent.clone();
+
+    // Default view is bottom-anchored (the end of the newest message is
+    // visible): build a bounded window backward from the anchor message and
+    // scroll it so the window's bottom sits at the pane's bottom. A
+    // text-search hit anchors at the hit instead, top-aligned, so the match
+    // is visible without needing a scroll offset.
+    let (msg_lines, scroll) = if let Some(hit) = hit_index {
+        let top_ref = (hit as isize + offset).clamp(0, last as isize) as usize;
+        let (lines, ..) =
+            extend_forward(messages, &agent, &query, top_ref, available, content_width);
+        (lines, 0)
+    } else {
+        let bottom_ref = (last as isize + offset).clamp(0, last as isize) as usize;
+        let (lines, _start, height) = extend_backward(
+            messages,
+            &agent,
+            &query,
+            bottom_ref,
+            available,
+            content_width,
+        );
+        (lines, height.saturating_sub(available))
+    };
+
+    frame.render_widget(
+        Paragraph::new(msg_lines)
+            .block(Block::default().padding(Padding::horizontal(1)))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0)),
+        message_area,
     );
 }
 
-/// Estimated wrapped row count of one message at `content_width`: each
-/// source line wraps to `max(1, ceil(chars / content_width))` rows (a label
-/// on the first line rides along in that row's width, so it adds no extra
-/// row), plus one blank separator row rendered after the message.
-fn message_height(text: &str, content_width: usize) -> usize {
-    let width = content_width.max(1);
-    let text_height: usize = text
-        .lines()
-        .map(|line| line.chars().count().div_ceil(width).max(1))
-        .sum();
-    text_height + 1
-}
-
-/// Index of the first message (walking backwards from the last one) whose
-/// accumulated height still fits within `available` rows. Always includes
-/// the last message, even if its height alone exceeds `available`.
-fn tail_start(heights: &[usize], available: usize) -> usize {
-    let Some(last) = heights.len().checked_sub(1) else {
-        return 0;
+/// Rendered lines for one message: a bold role label riding along the first
+/// line, then the rest of the message text, then one blank separator line.
+fn message_lines(agent: &str, query: &str, message: &Message) -> Vec<Line<'static>> {
+    let (name, color) = match message.role {
+        Role::User => ("you: ".to_string(), Color::Cyan),
+        Role::Assistant => (format!("{agent}: "), Color::Magenta),
     };
-    let mut start = last;
-    let mut total = heights[last];
-    while start > 0 && total + heights[start - 1] <= available {
-        start -= 1;
-        total += heights[start];
+    let mut lines = Vec::new();
+    for (i, text_line) in message.text.lines().enumerate() {
+        let mut spans = Vec::new();
+        if i == 0 {
+            spans.push(Span::styled(
+                name.clone(),
+                Style::new().fg(color).add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.extend(highlight(text_line, query, Style::new()));
+        lines.push(Line::from(spans));
     }
-    start
+    lines.push(Line::from(""));
+    lines
 }
 
-/// Index one past the last message (walking forward from `start`) whose
-/// accumulated height still fits within `available` rows. Always includes
-/// the message at `start`, even if its height alone exceeds `available`;
-/// bounds how many messages get built into lines per frame.
-fn forward_end(heights: &[usize], start: usize, available: usize) -> usize {
-    if start >= heights.len() {
-        return start;
+/// Builds lines for a window of messages ending at `end_inclusive`, walking
+/// backward and measuring the *real* rendered height with
+/// `Paragraph::line_count` (word-aware wrapping, not a char-count estimate)
+/// after each message is prepended. Stops once the measured height reaches
+/// `available` or there are no earlier messages, so a long conversation
+/// never has more than `available`-worth of messages built per frame.
+/// Always includes at least the message at `end_inclusive`, even if its
+/// height alone exceeds `available`. Returns (lines, start index, height).
+fn extend_backward(
+    messages: &[Message],
+    agent: &str,
+    query: &str,
+    end_inclusive: usize,
+    available: usize,
+    width: u16,
+) -> (Vec<Line<'static>>, usize, usize) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut start = end_inclusive;
+    loop {
+        let mut prefix = message_lines(agent, query, &messages[start]);
+        prefix.extend(lines);
+        lines = prefix;
+        let height = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width);
+        if height >= available || start == 0 {
+            return (lines, start, height);
+        }
+        start -= 1;
     }
-    let mut end = start + 1;
-    let mut total = heights[start];
-    while end < heights.len() && total + heights[end] <= available {
-        total += heights[end];
+}
+
+/// Builds lines for a window of messages starting at `start`, walking
+/// forward and measuring the real rendered height the same way as
+/// `extend_backward`. Always includes at least the message at `start`.
+/// Returns (lines, end index exclusive, height).
+fn extend_forward(
+    messages: &[Message],
+    agent: &str,
+    query: &str,
+    start: usize,
+    available: usize,
+    width: u16,
+) -> (Vec<Line<'static>>, usize, usize) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut end = start;
+    loop {
+        lines.extend(message_lines(agent, query, &messages[end]));
+        let height = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width);
         end += 1;
+        if height >= available || end >= messages.len() {
+            return (lines, end, height);
+        }
     }
-    end
 }
 
 #[cfg(test)]
@@ -315,38 +358,68 @@ mod tests {
         assert_eq!(highlight("abc", "", Style::new()).len(), 1);
     }
 
-    #[test]
-    fn tail_start_all_fit() {
-        let heights = vec![2, 2, 2];
-        assert_eq!(tail_start(&heights, 10), 0);
+    fn msg(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            text: text.into(),
+            ts: None,
+        }
     }
 
     #[test]
-    fn tail_start_last_alone_exceeds() {
-        let heights = vec![2, 2, 5];
-        assert_eq!(tail_start(&heights, 3), 2);
+    fn message_lines_labels_first_line_only() {
+        let m = Message {
+            role: Role::Assistant,
+            text: "line one\nline two".into(),
+            ts: None,
+        };
+        let lines = message_lines("claude", "", &m);
+        // 2 content lines + 1 trailing blank separator; no extra row for the label.
+        assert_eq!(lines.len(), 3);
     }
 
     #[test]
-    fn tail_start_mixed() {
-        let heights = vec![3, 4, 2, 5];
-        // From the end: 5 (total 5), + 2 (total 7, fits in 8), then + 4 would be 11 (doesn't fit).
-        assert_eq!(tail_start(&heights, 8), 2);
+    fn extend_backward_includes_all_when_they_fit() {
+        let messages = vec![msg("a"), msg("b"), msg("c")];
+        let (lines, start, height) = extend_backward(&messages, "assistant", "", 2, 10, 50);
+        assert_eq!(start, 0);
+        assert_eq!(height, 6); // 3 messages * (1 content row + 1 blank)
+        assert_eq!(lines.len(), 6);
     }
 
     #[test]
-    fn forward_end_includes_as_much_as_fits() {
-        let heights = vec![3, 4, 2, 5];
-        assert_eq!(forward_end(&heights, 0, 100), 4);
-        assert_eq!(forward_end(&heights, 0, 5), 1);
-        assert_eq!(forward_end(&heights, 2, 10), 4);
+    fn extend_backward_always_includes_the_anchor_even_if_it_overflows() {
+        let messages = vec![msg("a"), msg("b"), msg("c")];
+        let (_, start, height) = extend_backward(&messages, "assistant", "", 2, 1, 50);
+        assert_eq!(start, 2);
+        assert_eq!(height, 2);
     }
 
     #[test]
-    fn message_height_wraps_and_pads() {
-        assert_eq!(message_height("hello", 10), 2); // 1 wrapped row + 1 blank separator
-        assert_eq!(message_height("", 10), 1); // no content rows, just the separator
-        assert_eq!(message_height(&"x".repeat(25), 10), 4); // ceil(25/10) = 3, + 1 separator
+    fn extend_backward_stops_once_it_fills_available() {
+        let messages = vec![msg("a"), msg("b"), msg("c")];
+        // Anchor (2 rows) alone doesn't fill 3; one more message (4 rows)
+        // does, so it stops there rather than pulling in the earliest too.
+        let (_, start, height) = extend_backward(&messages, "assistant", "", 2, 3, 50);
+        assert_eq!(start, 1);
+        assert_eq!(height, 4);
+    }
+
+    #[test]
+    fn extend_forward_includes_all_when_they_fit() {
+        let messages = vec![msg("a"), msg("b"), msg("c")];
+        let (lines, end, height) = extend_forward(&messages, "assistant", "", 0, 10, 50);
+        assert_eq!(end, 3);
+        assert_eq!(height, 6);
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn extend_forward_stops_once_it_fills_available() {
+        let messages = vec![msg("a"), msg("b"), msg("c")];
+        let (_, end, height) = extend_forward(&messages, "assistant", "", 0, 3, 50);
+        assert_eq!(end, 2);
+        assert_eq!(height, 4);
     }
 
     fn catalog_with_long_tail() -> crate::catalog::Catalog {
@@ -390,5 +463,53 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(text.contains("LAST-MESSAGE-MARKER"));
+    }
+
+    fn catalog_with_wrapped_last_message() -> crate::catalog::Catalog {
+        use crate::cache::Cache;
+        use crate::catalog::Catalog;
+        use crate::config::Settings;
+        use crate::model::Role as MsgRole;
+        use crate::providers::fake::FakeProvider;
+
+        let mut p = FakeProvider::default();
+        p.add_source("one", "/s");
+        // Several hundred chars of ordinary space-separated words: at a narrow
+        // preview width this word-wraps across many more rows than a
+        // char-count / pane-width estimate would predict (word boundaries
+        // waste columns that a naive division doesn't account for).
+        let prose = "the quick brown fox jumps over the lazy dog while a \
+            second sentence keeps going with more ordinary words so that \
+            the paragraph wraps across a good double digit number of rows \
+            at a narrow preview pane width before finally ending right \
+            here at WRAPPED-TAIL-MARKER";
+        let messages = [
+            (MsgRole::User, "short earlier message"),
+            (MsgRole::Assistant, prose),
+        ];
+        p.add_session("/s", "a", "Wrapped convo", 1000, 1000, &messages);
+        Catalog::build(
+            vec![Box::new(p)],
+            &Settings::default(),
+            &mut Cache::in_memory(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn preview_default_view_shows_end_of_wrapped_last_message() {
+        let mut app = App::new(Arc::new(catalog_with_wrapped_last_message()), "");
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        terminal
+            .draw(|f| draw(f, &mut app, 10_000, Path::new("/home/x")))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("WRAPPED-TAIL-MARKER"));
     }
 }

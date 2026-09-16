@@ -25,8 +25,10 @@ pub fn run(catalog: Arc<Catalog>, query: &str) -> anyhow::Result<Option<LaunchPl
         let generation = worker.submit(query);
         app.set_text_generation(generation);
     }
-    // ratatui::init installs a panic hook that restores the terminal.
-    let mut terminal = ratatui::init();
+    // ratatui::try_init installs a panic hook that restores the terminal.
+    // Unlike ratatui::init, it reports failure (e.g. stdout isn't a TTY)
+    // instead of panicking; main() maps the error to exit code 2.
+    let mut terminal = ratatui::try_init()?;
     let result = event_loop(&mut terminal, &mut app, &worker, &home);
     ratatui::restore();
     result

@@ -2,6 +2,7 @@ pub mod cache;
 pub mod catalog;
 pub mod config;
 pub mod format;
+pub mod launch;
 pub mod model;
 pub mod providers;
 pub mod report;

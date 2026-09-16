@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ccpick::cache::{Cache, default_cache_path};
 use ccpick::catalog::Catalog;
-use ccpick::{config, providers, report};
+use ccpick::{config, launch, providers, report, ui};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -63,7 +63,15 @@ fn run() -> Result<i32> {
         return Ok(1);
     }
     let query = cli.query.join(" ");
-    // Until the TUI exists (Task 11), the default mode prints the list.
-    print!("{}", report::list_tsv(&catalog, &query));
-    Ok(0)
+    if cli.list {
+        print!("{}", report::list_tsv(&catalog, &query));
+        return Ok(0);
+    }
+    match ui::run(std::sync::Arc::new(catalog), &query)? {
+        Some(plan) => {
+            let err = launch::exec(&plan);
+            anyhow::bail!("failed to launch {}: {err}", plan.argv.join(" "))
+        }
+        None => Ok(0),
+    }
 }

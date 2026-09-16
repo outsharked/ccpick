@@ -28,7 +28,8 @@ with OpenAI Codex CLI. See **Agent providers**.
 
 Rust, single binary. Crates: `ratatui` + `crossterm` (TUI), `nucleo-matcher` (fuzzy),
 `serde`/`serde_json`/`serde_yaml`/`toml` (parsing), `memchr` (substring search), `rayon` (parallel
-scan), `clap` (CLI), `dirs` (paths), `nix` (exec + pid liveness). Repo: `~/code/ccpick`,
+scan), `clap` (CLI), `dirs` (paths), `chrono` (timestamps). Linux-first: liveness via `/proc`, launch via
+`std::os::unix::process::CommandExt::exec`. Repo: `~/code/ccpick`,
 `github.com/jamietre/ccpick`.
 
 ## Agent providers
@@ -50,15 +51,18 @@ trait Provider: Send + Sync {
     fn scan_file(&self, path: &Path) -> Option<SessionMeta>;
     /// Displayable/searchable messages (conversation text only, no tool payloads).
     fn messages(&self, path: &Path) -> Vec<Message>;
-    /// Currently running sessions for a source.
-    fn live_sessions(&self, source: &Source) -> Vec<LiveSession>;
+    /// Cheap pre-filter for full-text search: false only if the file certainly can't contain
+    /// `needle_lower` in its messages (e.g. raw-byte scan). Default: true.
+    fn may_contain(&self, path: &Path, needle_lower: &str) -> bool { true }
+    /// Launch records for a source (who started which session when, and whether it's still alive).
+    fn launch_records(&self, source: &Source) -> Vec<LaunchRecord>;
     /// Command/env to resume a session through a source. Pure.
     fn launch_plan(&self, source: &Source, session: &SessionMeta) -> LaunchPlan;
 }
 ```
 
 Agent-neutral types: `Source`, `SessionMeta`, `Message {role: Role, text, ts}`,
-`LiveSession {pid, session_id, source}`, `LaunchPlan {cwd, argv, env_set, env_remove}`. Every
+`LaunchRecord {pid, session_id, started_at_ms, alive}`, `LaunchSpec {argv_prefix, env_set, env_remove}`, `LaunchPlan {cwd, argv, env_set, env_remove}`. Every
 `SessionMeta` and `Source` carries its `agent` id; session identity is `(agent, id)`.
 
 Provider-specific configuration (ccs detection, launcher kinds) is owned by the provider and read
@@ -68,7 +72,7 @@ from its own config table, so adding a provider never changes shared config stru
 `$CODEX_HOME` / `~/.codex`; transcripts are dated `rollout-*.jsonl` files under `sessions/`
 (nested by date, not by project — so `list_session_files` must walk deeper, and `cwd` comes from
 file contents, not the path); resume via `codex resume <id>`; live-session detection may not have
-a pid registry, in which case `live_sessions` returns empty and the running badge is simply absent
+a pid registry, in which case `launch_records` returns empty and the running badge is simply absent
 for Codex. The design accommodates each of these: file enumeration, cwd extraction and liveness
 are all provider methods.
 
@@ -84,26 +88,28 @@ struct Source {
     agent: &'static str,   // provider id, "claude" in v1
     name: String,          // shown in UI: "c1", "claude", "work"
     config_dir: PathBuf,   // canonicalized
-    launcher: Launcher,
-}
-enum Launcher {
-    Ccs { account: String },            // ccs <account> --resume <id>
-    Claude { config_dir: Option<PathBuf> }, // [CLAUDE_CONFIG_DIR=<dir>] claude --resume <id>
-    Command { argv: Vec<String> },      // <argv...> --resume <id>
+    launch: LaunchSpec,    // agent-neutral: argv prefix + env changes
 }
 ```
+
+The Claude provider fills `LaunchSpec` per source kind; `launch_plan` appends `--resume <id>`:
+
+| Source kind | `argv_prefix` | env |
+|---|---|---|
+| ccs account | `["ccs", "<account>"]` | — |
+| `$CLAUDE_CONFIG_DIR` / configured dir / `--config-dir` | `["claude"]` | set `CLAUDE_CONFIG_DIR=<dir>` |
+| `~/.claude` | `["claude"]` | remove `CLAUDE_CONFIG_DIR` |
+| configured with `command` | the command argv | — |
 
 Sources are assembled in this order (earlier = higher priority for default launch):
 
 1. **ccs accounts** (if `~/.ccs/config.yaml` exists and `[claude] ccs = true`): ccs `default` account first,
-   then the rest in config order. `config_dir = ~/.ccs/instances/<name>`, launcher `Ccs`.
-2. **`$CLAUDE_CONFIG_DIR`**, if set, `[claude] home = true`, and not already a source. Name = directory basename. Launcher
-   `Claude { config_dir: Some(dir) }`.
-3. **`~/.claude`** (if it exists and `[claude] home = true`). Name `claude`. Launcher
-   `Claude { config_dir: None }` — launched with `CLAUDE_CONFIG_DIR` **removed** from the
-   environment so an inherited value doesn't redirect it.
+   then the rest in config order. `config_dir = ~/.ccs/instances/<name>`.
+2. **`$CLAUDE_CONFIG_DIR`**, if set, `[claude] home = true`, and not already a source. Name = directory basename.
+3. **`~/.claude`** (if it exists and `[claude] home = true`). Name `claude`. Launched with
+   `CLAUDE_CONFIG_DIR` **removed** from the environment so an inherited value doesn't redirect it.
 4. **Configured sources** from `~/.config/ccpick/config.toml`.
-5. **`--config-dir <DIR>`** CLI flags (repeatable). Name = basename, launcher `Claude`.
+5. **`--config-dir <DIR>`** CLI flags (repeatable). Name = basename.
 
 Sources whose canonical `config_dir` duplicates an earlier one are dropped.
 
@@ -140,12 +146,13 @@ Observed with Claude Code 2.1.x:
   - `user` / `assistant`: have `cwd`, `gitBranch`, `timestamp`, `sessionId`, `message.content`
     (string, or array of blocks: `text`, `tool_use`, `tool_result`, ...). `isMeta: true` lines are
     not real prompts.
-  - `ai-title` (`aiTitle`), `last-prompt` (`lastPrompt`); `custom-title` / `summary` if present.
+  - `ai-title` (`aiTitle`, may appear several times — last wins), `last-prompt` (`lastPrompt`);
+    `custom-title` (`customTitle`) / `summary` (`summary`) handled if present (not observed in 2.1.x data).
   - Subdirectories under a project dir (subagent/tool-result storage) are ignored.
 - **Live sessions:** `<config_dir>/sessions/<pid>.json` →
   `{pid, sessionId, cwd, startedAt, kind}`. Stale files remain after exit; a session is live only if
-  the pid exists (`kill(pid, 0)`) **and** `/proc/<pid>/cmdline` contains `claude` (guards against pid
-  reuse).
+  `/proc/<pid>/cmdline` is readable **and** contains `claude` (guards against pid reuse). Newer
+  records also carry `procStart`; not used in v1.
 - **ccs config:** `~/.ccs/config.yaml` → `default:` account name and `accounts:` map.
 
 ## Architecture
@@ -154,19 +161,19 @@ One crate, modules with single responsibilities:
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `model` | Agent-neutral types: `Source`, `SessionMeta`, `Message`, `LiveSession`, `LaunchPlan`; the `Provider` trait. | — |
+| `model` | Agent-neutral types: `Source`, `LaunchSpec`, `SessionMeta`, `Message`, `LaunchRecord`, `LaunchPlan`; the `Provider` trait. | — |
 | `config` | Load `~/.config/ccpick/config.toml` + CLI flags into `Settings` (shared keys + raw per-provider tables). | fs |
 | `providers/mod` | Provider registry (`Vec<Box<dyn Provider>>`; v1: Claude only). | `model` |
 | `providers/claude/sources` | Build ordered, deduped Claude sources (ccs config, env, `~/.claude`, config, flags). | `config` |
 | `providers/claude/transcript` | Parse Claude JSONL: metadata for `scan_file`, messages for `messages`. | fs |
-| `providers/claude/live` | `sessions/*.json` + pid liveness. | fs |
-| `providers/claude/launch` | `LaunchPlan` for `Ccs` / `Claude` / `Command` launchers. | `model` |
+| `providers/claude/live` | `sessions/*.json` → `LaunchRecord`s with `/proc` liveness. | fs |
+| `providers/claude/launch` | `LaunchSpec` per source kind; `launch_plan`. | `model` |
 | `stores` | Ask each provider for sources' stores; group sources by `(agent, canonical store)`; compute `store_sources` and default launch source per session (using live data). | providers |
 | `scan` | Enumerate files per store via provider, parallel `scan_file` with cache. | `cache`, providers |
 | `cache` | `~/.cache/ccpick/meta.json`: `(agent, path) → (size, mtime, SessionMeta)`. Reuse unchanged, rescan changed/new, drop missing, write atomically (tmp + rename). Versioned; mismatch or parse error → rebuild. | fs |
 | `search` | Tier 1: nucleo fuzzy over `title + cwd + branch + first_prompt`, synchronous per keystroke. Tier 2: case-insensitive substring (`memchr::memmem`) over `provider.messages()` text, on a worker thread with ~150 ms debounce; generation counter cancels stale runs; results via channel with snippet + message index. | `scan`, providers |
 | `ui` | App state, rendering, key handling. Agent-neutral. | all above |
-| `launch` | Execute a `LaunchPlan`: restore terminal, `chdir`, adjust env, `execvp`. | `nix` |
+| `launch` | Execute a `LaunchPlan`: restore terminal, `chdir`, adjust env, `exec`. | std |
 
 Data flow: `config` → providers discover sources → `stores` (+ live sessions) → `scan` per store in
 parallel, cached → in-memory sessions → `ui` loop with `search` worker → on Enter,
@@ -253,7 +260,7 @@ matched (not tool payloads), so results reflect the conversation, not file dumps
 - **Live:** stale vs live `sessions/*.json`; default launch source by latest `startedAt`.
 - **Provider boundary:** a test-only fake provider (in-memory sessions) drives `stores`, `scan`,
   `search` and `App` tests, proving the shared layers don't depend on Claude specifics.
-- **Launch:** `LaunchPlan` for each launcher kind — `Ccs` argv, `Claude` with and without
+- **Launch:** `LaunchPlan` for each source kind — ccs argv, `claude` with and without
   `CLAUDE_CONFIG_DIR` (including removal of an inherited value), `Command` argv; the exec itself is
   not tested.
 - **UI:** state-transition tests on `App` (key → state) without a terminal; one render snapshot

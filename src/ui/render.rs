@@ -10,8 +10,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Parag
 use std::path::Path;
 
 const HELP: &str = " ↵ resume  ^A source  ^R running only  ^S sort  tab preview  esc quit";
-/// Messages shown above the bottom when no search hit anchors the preview.
-const TAIL_MESSAGES: usize = 6;
+/// Header lines drawn above the message list in the preview pane (cwd/branch,
+/// msg count/id, separator).
+const PREVIEW_HEADER_LINES: usize = 3;
 
 pub fn highlight(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
     let needle = query.trim().to_ascii_lowercase();
@@ -139,24 +140,37 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
         Line::from("─".repeat(area.width.saturating_sub(2) as usize)).dim(),
     ];
 
-    let anchor = hit_index.unwrap_or(messages.len().saturating_sub(TAIL_MESSAGES)) as isize;
-    let last = messages.len().saturating_sub(1) as isize;
-    let start = (anchor + offset).clamp(0, last.max(0)) as usize;
-    let label = format!("{}: ", session.meta.agent);
-    for message in messages.iter().skip(start) {
-        let (name, color) = match message.role {
-            Role::User => ("you: ".to_string(), Color::Cyan),
-            Role::Assistant => (label.clone(), Color::Magenta),
-        };
-        for (i, text_line) in message.text.lines().enumerate() {
-            let mut spans = Vec::new();
-            if i == 0 {
-                spans.push(Span::styled(name.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
+    if !messages.is_empty() {
+        // Inner content width: pane width minus the 1-column padding on each side.
+        let content_width = area.width.saturating_sub(2) as usize;
+        // Rows available for messages: pane height minus the header lines above.
+        let available = (area.height as usize).saturating_sub(PREVIEW_HEADER_LINES);
+        let heights: Vec<usize> = messages.iter().map(|m| message_height(&m.text, content_width)).collect();
+        let last = messages.len() - 1;
+        // Default anchor keeps the newest message visible by walking backwards
+        // from the end; a text-search hit anchors at the hit instead.
+        let anchor = hit_index.unwrap_or_else(|| tail_start(&heights, available)).min(last) as isize;
+        let start = (anchor + offset).clamp(0, last as isize) as usize;
+        // Bound how many messages we build lines for, so an early hit in a long
+        // conversation doesn't render every message up to the end each frame.
+        let end = forward_end(&heights, start, available);
+
+        let label = format!("{}: ", session.meta.agent);
+        for message in &messages[start..end] {
+            let (name, color) = match message.role {
+                Role::User => ("you: ".to_string(), Color::Cyan),
+                Role::Assistant => (label.clone(), Color::Magenta),
+            };
+            for (i, text_line) in message.text.lines().enumerate() {
+                let mut spans = Vec::new();
+                if i == 0 {
+                    spans.push(Span::styled(name.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
+                }
+                spans.extend(highlight(text_line, &query, Style::new()));
+                lines.push(Line::from(spans));
             }
-            spans.extend(highlight(text_line, &query, Style::new()));
-            lines.push(Line::from(spans));
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(""));
     }
     frame.render_widget(
         Paragraph::new(lines)
@@ -164,6 +178,47 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// Estimated wrapped row count of one message at `content_width`: each
+/// source line wraps to `max(1, ceil(chars / content_width))` rows (a label
+/// on the first line rides along in that row's width, so it adds no extra
+/// row), plus one blank separator row rendered after the message.
+fn message_height(text: &str, content_width: usize) -> usize {
+    let width = content_width.max(1);
+    let text_height: usize = text.lines().map(|line| line.chars().count().div_ceil(width).max(1)).sum();
+    text_height + 1
+}
+
+/// Index of the first message (walking backwards from the last one) whose
+/// accumulated height still fits within `available` rows. Always includes
+/// the last message, even if its height alone exceeds `available`.
+fn tail_start(heights: &[usize], available: usize) -> usize {
+    let Some(last) = heights.len().checked_sub(1) else { return 0 };
+    let mut start = last;
+    let mut total = heights[last];
+    while start > 0 && total + heights[start - 1] <= available {
+        start -= 1;
+        total += heights[start];
+    }
+    start
+}
+
+/// Index one past the last message (walking forward from `start`) whose
+/// accumulated height still fits within `available` rows. Always includes
+/// the message at `start`, even if its height alone exceeds `available`;
+/// bounds how many messages get built into lines per frame.
+fn forward_end(heights: &[usize], start: usize, available: usize) -> usize {
+    if start >= heights.len() {
+        return start;
+    }
+    let mut end = start + 1;
+    let mut total = heights[start];
+    while end < heights.len() && total + heights[end] <= available {
+        total += heights[end];
+        end += 1;
+    }
+    end
 }
 
 #[cfg(test)]
@@ -205,5 +260,69 @@ mod tests {
         let parts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(parts, vec!["Fix ", "DOCKER", " now"]);
         assert_eq!(highlight("abc", "", Style::new()).len(), 1);
+    }
+
+    #[test]
+    fn tail_start_all_fit() {
+        let heights = vec![2, 2, 2];
+        assert_eq!(tail_start(&heights, 10), 0);
+    }
+
+    #[test]
+    fn tail_start_last_alone_exceeds() {
+        let heights = vec![2, 2, 5];
+        assert_eq!(tail_start(&heights, 3), 2);
+    }
+
+    #[test]
+    fn tail_start_mixed() {
+        let heights = vec![3, 4, 2, 5];
+        // From the end: 5 (total 5), + 2 (total 7, fits in 8), then + 4 would be 11 (doesn't fit).
+        assert_eq!(tail_start(&heights, 8), 2);
+    }
+
+    #[test]
+    fn forward_end_includes_as_much_as_fits() {
+        let heights = vec![3, 4, 2, 5];
+        assert_eq!(forward_end(&heights, 0, 100), 4);
+        assert_eq!(forward_end(&heights, 0, 5), 1);
+        assert_eq!(forward_end(&heights, 2, 10), 4);
+    }
+
+    #[test]
+    fn message_height_wraps_and_pads() {
+        assert_eq!(message_height("hello", 10), 2); // 1 wrapped row + 1 blank separator
+        assert_eq!(message_height("", 10), 1); // no content rows, just the separator
+        assert_eq!(message_height(&"x".repeat(25), 10), 4); // ceil(25/10) = 3, + 1 separator
+    }
+
+    fn catalog_with_long_tail() -> crate::catalog::Catalog {
+        use crate::cache::Cache;
+        use crate::catalog::Catalog;
+        use crate::config::Settings;
+        use crate::model::Role as MsgRole;
+        use crate::providers::fake::FakeProvider;
+
+        let mut p = FakeProvider::default();
+        p.add_source("one", "/s");
+        let long = "x".repeat(400);
+        let messages = [
+            (MsgRole::User, long.as_str()),
+            (MsgRole::Assistant, long.as_str()),
+            (MsgRole::User, long.as_str()),
+            (MsgRole::Assistant, long.as_str()),
+            (MsgRole::User, "LAST-MESSAGE-MARKER"),
+        ];
+        p.add_session("/s", "a", "Long convo", 1000, 1000, &messages);
+        Catalog::build(vec![Box::new(p)], &Settings::default(), &mut Cache::in_memory()).unwrap()
+    }
+
+    #[test]
+    fn preview_keeps_newest_message_visible() {
+        let mut app = App::new(Arc::new(catalog_with_long_tail()), "");
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, 10_000, Path::new("/home/x"))).unwrap();
+        let text: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("LAST-MESSAGE-MARKER"));
     }
 }

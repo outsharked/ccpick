@@ -6,3 +6,4 @@ pub mod model;
 pub mod providers;
 pub mod report;
 pub mod search;
+pub mod ui;

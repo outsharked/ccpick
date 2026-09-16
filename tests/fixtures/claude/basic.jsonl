@@ -1,0 +1,10 @@
+{"type":"permission-mode","permissionMode":"default","sessionId":"basic"}
+{"type":"user","cwd":"/work/proj","gitBranch":"main","timestamp":"2026-09-01T10:00:00.000Z","sessionId":"basic","message":{"role":"user","content":"<command-name>/clear</command-name>"}}
+{"type":"user","isMeta":true,"cwd":"/work/proj","timestamp":"2026-09-01T10:00:01.000Z","message":{"role":"user","content":"Caveat: meta line"}}
+{"type":"user","cwd":"/work/proj","gitBranch":"main","timestamp":"2026-09-01T10:00:02.000Z","message":{"role":"user","content":"Fix the Docker build cache\nsecond line"}}
+{"type":"assistant","cwd":"/work/proj","gitBranch":"main","timestamp":"2026-09-01T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Looking at the Dockerfile."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"docker build ."}}]}}
+{"type":"user","cwd":"/work/proj","gitBranch":"feature-x","timestamp":"2026-09-01T10:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"SECRETTOOLOUTPUT"}]}}
+{"type":"assistant","cwd":"/work/proj","gitBranch":"feature-x","timestamp":"2026-09-01T10:05:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Cache fixed."}]}}
+{"type":"ai-title","aiTitle":"Old title","sessionId":"basic"}
+{"type":"ai-title","aiTitle":"Docker build cache fix","sessionId":"basic"}
+{"type":"assistant","cwd":"/work/proj","timestamp":"2026-09-01T10:06:00.000Z","message":{"role":"assist

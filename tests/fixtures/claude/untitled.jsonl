@@ -1,0 +1,1 @@
+{"type":"user","cwd":"/work/long","timestamp":"2026-09-03T09:00:00.000Z","message":{"role":"user","content":"This prompt is intentionally much longer than eighty characters so that the title gets truncated nicely\nand has a second line"}}

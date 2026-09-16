@@ -199,7 +199,16 @@ impl App {
     fn scroll_or_move(&mut self, delta: isize) {
         match self.focus {
             Focus::List => self.move_selection(delta),
-            Focus::Preview => self.preview_offset += delta,
+            Focus::Preview => {
+                // Bound how far the offset can drift from the default anchor:
+                // a window start can never fall outside the message list, so
+                // an offset magnitude beyond `len - 1` can never do anything
+                // (render.rs clamps the resulting start to [0, last]) but
+                // would otherwise accumulate unboundedly and require many
+                // opposite presses to undo.
+                let bound = self.preview_messages().len().saturating_sub(1) as isize;
+                self.preview_offset = (self.preview_offset + delta).clamp(-bound, bound);
+            }
         }
     }
 
@@ -459,6 +468,23 @@ mod tests {
         assert_eq!(a.preview_offset, -1);
         assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::Quit);
         assert_eq!(a.handle_key(ctrl('c')), Action::Quit);
+    }
+
+    #[test]
+    fn preview_offset_is_clamped_to_message_count() {
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Tab));
+        // Session "a" (selected by default) has 2 messages, so the offset
+        // range that can ever produce a valid window start is [-1, 1].
+        assert_eq!(a.preview_messages().len(), 2);
+        for _ in 0..10 {
+            a.handle_key(key(KeyCode::Up));
+        }
+        assert_eq!(a.preview_offset, -1);
+        for _ in 0..20 {
+            a.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(a.preview_offset, 1);
     }
 
     #[test]

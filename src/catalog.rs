@@ -128,7 +128,7 @@ impl Catalog {
                 });
             }
         }
-        sessions.sort_by(|a, b| b.meta.last_ts.cmp(&a.meta.last_ts));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.meta.last_ts));
 
         Ok(Catalog {
             providers,

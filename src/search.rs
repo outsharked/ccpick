@@ -161,10 +161,9 @@ impl SearchWorker {
                 let (job_generation, query) = job;
                 if let Some(hits) =
                     full_text(&catalog, &all, &query, Some((&current, job_generation)))
+                    && result_tx.send((job_generation, hits)).is_err()
                 {
-                    if result_tx.send((job_generation, hits)).is_err() {
-                        return;
-                    }
+                    return;
                 }
             }
         });

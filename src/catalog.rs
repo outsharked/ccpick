@@ -48,6 +48,19 @@ impl Catalog {
             }
         }
 
+        // A `[[source]]` entry whose `agent` matches no registered provider
+        // would otherwise be silently dropped by every provider's discovery
+        // (each only looks at entries for its own id).
+        for sc in &settings.file.sources {
+            if !providers.iter().any(|p| p.id() == sc.agent) {
+                let label = sc.name.as_deref().unwrap_or(sc.config_dir.as_str());
+                warnings.push(format!(
+                    "source {label} skipped: unknown agent \"{}\"",
+                    sc.agent
+                ));
+            }
+        }
+
         let mut stores: Vec<Store> = Vec::new();
         for (si, source) in sources.iter().enumerate() {
             let pi = source_provider[si];
@@ -288,6 +301,24 @@ mod tests {
         .unwrap();
         assert!(c.sessions.is_empty());
         assert_eq!(c.warnings.len(), 1);
+    }
+
+    #[test]
+    fn unknown_source_agent_warns() {
+        let mut p = FakeProvider::default();
+        p.add_source("one", "/s");
+        let settings = Settings {
+            file: crate::config::parse_config(
+                "[[source]]\nagent = \"bogus\"\nname = \"ghost\"\nconfig_dir = \"/nowhere\"\n",
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let c = Catalog::build(vec![Box::new(p)], &settings, &mut Cache::in_memory()).unwrap();
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].contains("ghost"));
+        assert!(c.warnings[0].contains("unknown agent"));
+        assert!(c.warnings[0].contains("bogus"));
     }
 
     #[test]

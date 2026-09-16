@@ -67,7 +67,7 @@ impl App {
             preview: None,
         };
         app.recompute_rows(false);
-        // Surface discovery problems (e.g. unreadable ccs config) until the first keypress clears them.
+        // Surface discovery problems (e.g. an unreadable source config) until the first keypress clears them.
         app.status = app.catalog.warnings.first().map(|w| format!("warning: {w}"));
         app
     }

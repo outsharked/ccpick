@@ -49,7 +49,9 @@ struct Block {
 }
 
 pub fn parse_ts(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
@@ -105,7 +107,9 @@ fn for_each_line(path: &Path, mut f: impl FnMut(Line<'_>)) -> Option<usize> {
     let mut parsed = 0;
     for raw in BufReader::new(file).split(b'\n') {
         let Ok(raw) = raw else { break };
-        let Ok(line) = serde_json::from_slice::<Line>(&raw) else { continue };
+        let Ok(line) = serde_json::from_slice::<Line>(&raw) else {
+            continue;
+        };
         parsed += 1;
         f(line);
     }
@@ -197,7 +201,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude")
+            .join(name)
     }
 
     #[test]
@@ -220,16 +226,27 @@ mod tests {
         let texts: Vec<&str> = msgs.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(
             texts,
-            vec!["Fix the Docker build cache\nsecond line", "Looking at the Dockerfile.", "Cache fixed."]
+            vec![
+                "Fix the Docker build cache\nsecond line",
+                "Looking at the Dockerfile.",
+                "Cache fixed."
+            ]
         );
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[1].role, Role::Assistant);
-        assert!(!texts.iter().any(|t| t.contains("SECRETTOOLOUTPUT") || t.contains("docker build .")));
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("SECRETTOOLOUTPUT") || t.contains("docker build ."))
+        );
     }
 
     #[test]
     fn custom_title_wins() {
-        assert_eq!(scan_file(&fixture("custom-title.jsonl")).unwrap().title, "My renamed session");
+        assert_eq!(
+            scan_file(&fixture("custom-title.jsonl")).unwrap().title,
+            "My renamed session"
+        );
     }
 
     #[test]

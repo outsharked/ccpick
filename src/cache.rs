@@ -16,8 +16,16 @@ pub struct Stamp {
 impl Stamp {
     pub fn of(path: &Path) -> Option<Stamp> {
         let md = std::fs::metadata(path).ok()?;
-        let mtime_ms = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis() as i64;
-        Some(Stamp { size: md.len(), mtime_ms })
+        let mtime_ms = md
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis() as i64;
+        Some(Stamp {
+            size: md.len(),
+            mtime_ms,
+        })
     }
 }
 
@@ -56,11 +64,21 @@ impl Cache {
             .filter(|file| file.version == VERSION)
             .map(|file| file.entries)
             .unwrap_or_default();
-        Cache { path: Some(path), entries, touched: HashSet::new(), dirty: false }
+        Cache {
+            path: Some(path),
+            entries,
+            touched: HashSet::new(),
+            dirty: false,
+        }
     }
 
     pub fn in_memory() -> Cache {
-        Cache { path: None, entries: HashMap::new(), touched: HashSet::new(), dirty: false }
+        Cache {
+            path: None,
+            entries: HashMap::new(),
+            touched: HashSet::new(),
+            dirty: false,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -73,7 +91,11 @@ impl Cache {
 
     pub fn get(&mut self, agent: &str, file: &Path, stamp: Stamp) -> Option<SessionMeta> {
         let k = key(agent, file);
-        let hit = self.entries.get(&k).filter(|e| e.stamp == stamp).map(|e| e.meta.clone());
+        let hit = self
+            .entries
+            .get(&k)
+            .filter(|e| e.stamp == stamp)
+            .map(|e| e.meta.clone());
         if hit.is_some() {
             self.touched.insert(k);
         }
@@ -94,14 +116,19 @@ impl Cache {
         if self.entries.len() != before {
             self.dirty = true;
         }
-        let Some(path) = self.path.clone() else { return Ok(()) };
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
         if !self.dirty {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = CacheFile { version: VERSION, entries: std::mem::take(&mut self.entries) };
+        let file = CacheFile {
+            version: VERSION,
+            entries: std::mem::take(&mut self.entries),
+        };
         let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other);
         self.entries = file.entries;
         let tmp = path.with_extension("json.tmp");
@@ -132,7 +159,10 @@ mod tests {
         }
     }
 
-    const STAMP: Stamp = Stamp { size: 10, mtime_ms: 100 };
+    const STAMP: Stamp = Stamp {
+        size: 10,
+        mtime_ms: 100,
+    };
 
     #[test]
     fn round_trip_hit() {
@@ -142,15 +172,38 @@ mod tests {
         c.put("claude", Path::new("/s/a.jsonl"), STAMP, meta("a"));
         c.save().unwrap();
         let mut c2 = Cache::load(path);
-        assert_eq!(c2.get("claude", Path::new("/s/a.jsonl"), STAMP), Some(meta("a")));
+        assert_eq!(
+            c2.get("claude", Path::new("/s/a.jsonl"), STAMP),
+            Some(meta("a"))
+        );
     }
 
     #[test]
     fn changed_stamp_or_agent_misses() {
         let mut c = Cache::in_memory();
         c.put("claude", Path::new("/s/a.jsonl"), STAMP, meta("a"));
-        assert!(c.get("claude", Path::new("/s/a.jsonl"), Stamp { size: 11, mtime_ms: 100 }).is_none());
-        assert!(c.get("claude", Path::new("/s/a.jsonl"), Stamp { size: 10, mtime_ms: 101 }).is_none());
+        assert!(
+            c.get(
+                "claude",
+                Path::new("/s/a.jsonl"),
+                Stamp {
+                    size: 11,
+                    mtime_ms: 100
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            c.get(
+                "claude",
+                Path::new("/s/a.jsonl"),
+                Stamp {
+                    size: 10,
+                    mtime_ms: 101
+                }
+            )
+            .is_none()
+        );
         assert!(c.get("codex", Path::new("/s/a.jsonl"), STAMP).is_none());
     }
 

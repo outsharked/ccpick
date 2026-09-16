@@ -59,9 +59,15 @@ pub fn list_tsv(catalog: &Catalog, query: &str) -> String {
             "{}\t{}\t{}\t{}\t{}\t{}",
             local_time(s.meta.last_ts),
             catalog.sources[s.default_source].name,
-            s.live.map(|(pid, _)| pid.to_string()).unwrap_or_else(|| "-".into()),
+            s.live
+                .map(|(pid, _)| pid.to_string())
+                .unwrap_or_else(|| "-".into()),
             s.meta.id,
-            s.meta.cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "-".into()),
+            s.meta
+                .cwd
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".into()),
             s.meta.title
         );
     }

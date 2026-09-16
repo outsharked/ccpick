@@ -24,7 +24,9 @@ pub fn is_claude_process(pid: i32) -> bool {
 }
 
 pub fn launch_records(config_dir: &Path) -> Vec<LaunchRecord> {
-    let Ok(entries) = std::fs::read_dir(config_dir.join("sessions")) else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(config_dir.join("sessions")) else {
+        return vec![];
+    };
     let mut records: Vec<LaunchRecord> = entries
         .flatten()
         .map(|e| e.path())

@@ -52,7 +52,11 @@ impl FakeProvider {
         };
         let msgs = messages
             .iter()
-            .map(|(role, text)| Message { role: *role, text: text.to_string(), ts: None })
+            .map(|(role, text)| Message {
+                role: *role,
+                text: text.to_string(),
+                ts: None,
+            })
             .collect();
         self.files.insert(path, (meta, msgs));
     }
@@ -70,14 +74,21 @@ impl Provider for FakeProvider {
         "fake"
     }
     fn discover_sources(&self, _settings: &Settings) -> anyhow::Result<Discovery> {
-        Ok(Discovery { sources: self.sources.clone(), warnings: vec![] })
+        Ok(Discovery {
+            sources: self.sources.clone(),
+            warnings: vec![],
+        })
     }
     fn store_for(&self, source: &Source) -> Option<PathBuf> {
         self.stores.get(&source.name).cloned()
     }
     fn list_session_files(&self, store: &Path) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> =
-            self.files.keys().filter(|p| p.parent() == Some(store)).cloned().collect();
+        let mut files: Vec<PathBuf> = self
+            .files
+            .keys()
+            .filter(|p| p.parent() == Some(store))
+            .cloned()
+            .collect();
         files.sort();
         files
     }
@@ -85,7 +96,10 @@ impl Provider for FakeProvider {
         self.files.get(path).map(|f| f.0.clone())
     }
     fn messages(&self, path: &Path) -> Vec<Message> {
-        self.files.get(path).map(|f| f.1.clone()).unwrap_or_default()
+        self.files
+            .get(path)
+            .map(|f| f.1.clone())
+            .unwrap_or_default()
     }
     fn launch_records(&self, source: &Source) -> Vec<LaunchRecord> {
         self.records.get(&source.name).cloned().unwrap_or_default()
@@ -118,6 +132,9 @@ mod tests {
         assert_eq!(files.len(), 1);
         let meta = p.scan_file(&files[0]).unwrap();
         assert_eq!(p.messages(&files[0])[0].text, "hi");
-        assert_eq!(p.launch_plan(src, &meta).argv, vec!["fake", "one", "--resume", "a"]);
+        assert_eq!(
+            p.launch_plan(src, &meta).argv,
+            vec!["fake", "one", "--resume", "a"]
+        );
     }
 }

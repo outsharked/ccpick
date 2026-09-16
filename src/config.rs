@@ -38,7 +38,10 @@ pub struct Settings {
 impl Settings {
     /// Non-empty environment variable value.
     pub fn env_var(&self, key: &str) -> Option<&str> {
-        self.env.get(key).map(String::as_str).filter(|v| !v.is_empty())
+        self.env
+            .get(key)
+            .map(String::as_str)
+            .filter(|v| !v.is_empty())
     }
 
     pub fn expand(&self, path: &str) -> PathBuf {
@@ -70,7 +73,10 @@ pub fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("ccpick").join("config.toml"))
 }
 
-pub fn load_settings(config_path: Option<&Path>, cli_config_dirs: Vec<PathBuf>) -> Result<Settings> {
+pub fn load_settings(
+    config_path: Option<&Path>,
+    cli_config_dirs: Vec<PathBuf>,
+) -> Result<Settings> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
     let file = match config_path {
         Some(path) if path.exists() => {

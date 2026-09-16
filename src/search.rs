@@ -17,7 +17,10 @@ fn haystack(meta: &SessionMeta) -> String {
     format!(
         "{} {} {} {}",
         meta.title,
-        meta.cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        meta.cwd
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         meta.branch.as_deref().unwrap_or(""),
         prompt
     )
@@ -35,12 +38,15 @@ pub fn fuzzy(catalog: &Catalog, candidates: &[usize], query: &str) -> Vec<usize>
         .iter()
         .filter_map(|&i| {
             let hay = haystack(&catalog.sessions[i].meta);
-            pattern.score(Utf32Str::new(&hay, &mut buf), &mut matcher).map(|score| (score, i))
+            pattern
+                .score(Utf32Str::new(&hay, &mut buf), &mut matcher)
+                .map(|score| (score, i))
         })
         .collect();
     let sessions = &catalog.sessions;
     scored.sort_by(|a, b| {
-        b.0.cmp(&a.0).then(sessions[b.1].meta.last_ts.cmp(&sessions[a.1].meta.last_ts))
+        b.0.cmp(&a.0)
+            .then(sessions[b.1].meta.last_ts.cmp(&sessions[a.1].meta.last_ts))
     });
     scored.into_iter().map(|(_, i)| i).collect()
 }
@@ -69,7 +75,11 @@ fn ceil_boundary(s: &str, mut i: usize) -> usize {
 /// ~100-char single-line window around a match. `pos`/`len` are byte offsets into `lower`.
 pub fn snippet(original: &str, lower: &str, pos: usize, len: usize) -> String {
     // Offsets are only valid for `original` if lowercasing didn't change byte lengths.
-    let src = if original.len() == lower.len() { original } else { lower };
+    let src = if original.len() == lower.len() {
+        original
+    } else {
+        lower
+    };
     let start = floor_boundary(src, pos.saturating_sub(40));
     let end = ceil_boundary(src, (pos + len + 60).min(src.len()));
     let mut out = String::new();
@@ -94,7 +104,8 @@ pub fn full_text(
         return Some(Vec::new());
     }
     let finder = memmem::Finder::new(needle.as_bytes());
-    let cancelled = || cancel.is_some_and(|(current, mine)| current.load(Ordering::Relaxed) != mine);
+    let cancelled =
+        || cancel.is_some_and(|(current, mine)| current.load(Ordering::Relaxed) != mine);
 
     let mut hits: Vec<TextHit> = candidates
         .par_iter()
@@ -116,7 +127,12 @@ pub fn full_text(
         return None;
     }
     let sessions = &catalog.sessions;
-    hits.sort_by(|a, b| sessions[b.session].meta.last_ts.cmp(&sessions[a.session].meta.last_ts));
+    hits.sort_by(|a, b| {
+        sessions[b.session]
+            .meta
+            .last_ts
+            .cmp(&sessions[a.session].meta.last_ts)
+    });
     Some(hits)
 }
 
@@ -143,14 +159,20 @@ impl SearchWorker {
                     }
                 }
                 let (job_generation, query) = job;
-                if let Some(hits) = full_text(&catalog, &all, &query, Some((&current, job_generation))) {
+                if let Some(hits) =
+                    full_text(&catalog, &all, &query, Some((&current, job_generation)))
+                {
                     if result_tx.send((job_generation, hits)).is_err() {
                         return;
                     }
                 }
             }
         });
-        SearchWorker { tx, results, generation }
+        SearchWorker {
+            tx,
+            results,
+            generation,
+        }
     }
 
     /// Queue a query; returns its generation. Older in-flight searches are cancelled.
@@ -237,6 +259,11 @@ mod tests {
         let (generation, hits) = worker.results.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(generation, latest);
         assert_eq!(hits[0].session, 1);
-        assert!(worker.results.recv_timeout(Duration::from_millis(200)).is_err());
+        assert!(
+            worker
+                .results
+                .recv_timeout(Duration::from_millis(200))
+                .is_err()
+        );
     }
 }

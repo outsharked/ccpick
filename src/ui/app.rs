@@ -68,7 +68,11 @@ impl App {
         };
         app.recompute_rows(false);
         // Surface discovery problems (e.g. an unreadable source config) until the first keypress clears them.
-        app.status = app.catalog.warnings.first().map(|w| format!("warning: {w}"));
+        app.status = app
+            .catalog
+            .warnings
+            .first()
+            .map(|w| format!("warning: {w}"));
         app
     }
 
@@ -103,7 +107,9 @@ impl App {
     }
 
     pub fn preview_messages(&mut self) -> &[Message] {
-        let Some(idx) = self.selected_session() else { return &[] };
+        let Some(idx) = self.selected_session() else {
+            return &[];
+        };
         if self.preview.as_ref().map(|p| p.0) != Some(idx) {
             self.preview = Some((idx, self.catalog.messages(idx)));
         }
@@ -116,26 +122,40 @@ impl App {
             .filter(|&i| !self.running_only || sessions[i].live.is_some())
             .collect();
         match self.sort {
-            SortMode::LastActivity => v.sort_by(|a, b| sessions[*b].meta.last_ts.cmp(&sessions[*a].meta.last_ts)),
-            SortMode::Created => v.sort_by(|a, b| sessions[*b].meta.first_ts.cmp(&sessions[*a].meta.first_ts)),
+            SortMode::LastActivity => {
+                v.sort_by(|a, b| sessions[*b].meta.last_ts.cmp(&sessions[*a].meta.last_ts))
+            }
+            SortMode::Created => {
+                v.sort_by(|a, b| sessions[*b].meta.first_ts.cmp(&sessions[*a].meta.first_ts))
+            }
         }
         v
     }
 
     fn recompute_rows(&mut self, keep_selection: bool) {
-        let previous = if keep_selection { self.selected_session() } else { None };
+        let previous = if keep_selection {
+            self.selected_session()
+        } else {
+            None
+        };
         let candidates = self.candidates();
         let fuzzy = search::fuzzy(&self.catalog, &candidates, &self.query);
         let in_fuzzy: HashSet<usize> = fuzzy.iter().copied().collect();
         let allowed: HashSet<usize> = candidates.iter().copied().collect();
 
-        let mut rows: Vec<Row> = fuzzy.into_iter().map(|idx| Row::Session { idx, snippet: None }).collect();
+        let mut rows: Vec<Row> = fuzzy
+            .into_iter()
+            .map(|idx| Row::Session { idx, snippet: None })
+            .collect();
         if !self.query.trim().is_empty() {
             let extra: Vec<Row> = self
                 .text_hits
                 .iter()
                 .filter(|h| allowed.contains(&h.session) && !in_fuzzy.contains(&h.session))
-                .map(|h| Row::Session { idx: h.session, snippet: Some(h.snippet.clone()) })
+                .map(|h| Row::Session {
+                    idx: h.session,
+                    snippet: Some(h.snippet.clone()),
+                })
                 .collect();
             if !extra.is_empty() {
                 rows.push(Row::Divider);
@@ -144,9 +164,15 @@ impl App {
         }
         self.rows = rows;
         self.selected = previous
-            .and_then(|p| self.rows.iter().position(|r| matches!(r, Row::Session { idx, .. } if *idx == p)))
+            .and_then(|p| {
+                self.rows
+                    .iter()
+                    .position(|r| matches!(r, Row::Session { idx, .. } if *idx == p))
+            })
             .unwrap_or(0);
-        if matches!(self.rows.get(self.selected), Some(Row::Divider)) && self.selected + 1 < self.rows.len() {
+        if matches!(self.rows.get(self.selected), Some(Row::Divider))
+            && self.selected + 1 < self.rows.len()
+        {
             self.selected += 1;
         }
     }
@@ -186,7 +212,9 @@ impl App {
     }
 
     fn cycle_source(&mut self) {
-        let Some(idx) = self.selected_session() else { return };
+        let Some(idx) = self.selected_session() else {
+            return;
+        };
         let sources = &self.catalog.sessions[idx].sources;
         if sources.len() < 2 {
             self.status = Some("no other source can resume this session".into());
@@ -200,14 +228,21 @@ impl App {
     }
 
     fn enter(&mut self) -> Action {
-        let Some(idx) = self.selected_session() else { return Action::None };
+        let Some(idx) = self.selected_session() else {
+            return Action::None;
+        };
         let session = &self.catalog.sessions[idx];
         if let Some((pid, source)) = session.live {
-            self.status = Some(format!("running in {} (pid {pid})", self.catalog.sources[source].name));
+            self.status = Some(format!(
+                "running in {} (pid {pid})",
+                self.catalog.sources[source].name
+            ));
             return Action::None;
         }
         match &session.meta.cwd {
-            Some(cwd) if cwd.is_dir() => Action::Launch(self.catalog.launch_plan(idx, self.launch_source(idx))),
+            Some(cwd) if cwd.is_dir() => {
+                Action::Launch(self.catalog.launch_plan(idx, self.launch_source(idx)))
+            }
             Some(cwd) => {
                 self.status = Some(format!("project dir no longer exists: {}", cwd.display()));
                 Action::None
@@ -314,11 +349,20 @@ mod tests {
     #[test]
     fn typing_filters_and_requests_search() {
         let mut a = app("");
-        assert_eq!(a.handle_key(key(KeyCode::Char('k'))), Action::Search("k".into()));
+        assert_eq!(
+            a.handle_key(key(KeyCode::Char('k'))),
+            Action::Search("k".into())
+        );
         a.handle_key(key(KeyCode::Char('u')));
-        assert_eq!(a.handle_key(key(KeyCode::Char('b'))), Action::Search("kub".into()));
+        assert_eq!(
+            a.handle_key(key(KeyCode::Char('b'))),
+            Action::Search("kub".into())
+        );
         assert_eq!(session_ids(&a)[0], "b");
-        assert_eq!(a.handle_key(key(KeyCode::Backspace)), Action::Search("ku".into()));
+        assert_eq!(
+            a.handle_key(key(KeyCode::Backspace)),
+            Action::Search("ku".into())
+        );
     }
 
     #[test]
@@ -332,7 +376,9 @@ mod tests {
         assert!(a.rows.is_empty());
         a.apply_text_hits(7, hits);
         assert_eq!(a.rows[0], Row::Divider);
-        assert!(matches!(&a.rows[1], Row::Session { idx: 1, snippet: Some(s) } if s.contains("PINEAPPLE")));
+        assert!(
+            matches!(&a.rows[1], Row::Session { idx: 1, snippet: Some(s) } if s.contains("PINEAPPLE"))
+        );
         assert_eq!(a.selected, 1);
         assert_eq!(a.text_hit(1).unwrap().message_index, 0);
     }
@@ -362,7 +408,10 @@ mod tests {
         let mut a = app("");
         a.selected = 3;
         a.handle_key(ctrl('a'));
-        assert_eq!(a.status.as_deref(), Some("no other source can resume this session"));
+        assert_eq!(
+            a.status.as_deref(),
+            Some("no other source can resume this session")
+        );
     }
 
     #[test]
@@ -417,6 +466,9 @@ mod tests {
         let mut a = app("");
         assert_eq!(a.preview_messages().len(), 2);
         a.handle_key(key(KeyCode::Down));
-        assert_eq!(a.preview_messages()[0].text, "the ingress needs a PINEAPPLE annotation");
+        assert_eq!(
+            a.preview_messages()[0].text,
+            "the ingress needs a PINEAPPLE annotation"
+        );
     }
 }

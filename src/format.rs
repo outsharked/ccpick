@@ -29,7 +29,11 @@ pub fn shorten_home(path: &Path, home: &Path) -> String {
 pub fn local_time(ts_ms: Option<i64>) -> String {
     ts_ms
         .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|| "-".into())
 }
 

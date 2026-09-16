@@ -17,7 +17,10 @@ pub struct ClaudeConfig {
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        Self { ccs: true, home: true }
+        Self {
+            ccs: true,
+            home: true,
+        }
     }
 }
 
@@ -49,17 +52,27 @@ fn claude_with_dir(dir: &Path) -> LaunchSpec {
 }
 
 fn source(name: String, config_dir: PathBuf, launch: LaunchSpec) -> Source {
-    Source { agent: AGENT.into(), name, config_dir, launch }
+    Source {
+        agent: AGENT.into(),
+        name,
+        config_dir,
+        launch,
+    }
 }
 
 /// ccs account names, default account first. Ok(empty) if ccs isn't installed.
 fn ccs_accounts(home: &Path) -> Result<Vec<String>, String> {
     let path = home.join(".ccs/config.yaml");
-    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(vec![]) };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(vec![]);
+    };
     let cfg: CcsConfig = serde_yaml::from_str(&text)
         .map_err(|e| format!("ignoring ccs config {}: {e}", path.display()))?;
-    let mut names: Vec<String> =
-        cfg.accounts.keys().filter_map(|k| k.as_str().map(String::from)).collect();
+    let mut names: Vec<String> = cfg
+        .accounts
+        .keys()
+        .filter_map(|k| k.as_str().map(String::from))
+        .collect();
     if let Some(default) = cfg.default
         && let Some(pos) = names.iter().position(|n| *n == default)
     {
@@ -83,7 +96,10 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
                         argv_prefix: vec!["ccs".into(), name.clone()],
                         ..Default::default()
                     };
-                    candidates.push(Candidate { source: source(name, dir, launch), explicit: true });
+                    candidates.push(Candidate {
+                        source: source(name, dir, launch),
+                        explicit: true,
+                    });
                 }
             }
             Err(warning) => out.warnings.push(warning),
@@ -94,7 +110,10 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
         if let Some(dir) = settings.env_var(ENV_CONFIG_DIR) {
             let dir = settings.expand(dir);
             let launch = claude_with_dir(&dir);
-            candidates.push(Candidate { source: source(basename(&dir), dir, launch), explicit: true });
+            candidates.push(Candidate {
+                source: source(basename(&dir), dir, launch),
+                explicit: true,
+            });
         }
         let launch = LaunchSpec {
             argv_prefix: vec!["claude".into()],
@@ -110,13 +129,17 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
     for sc in settings.file.sources.iter().filter(|s| s.agent == AGENT) {
         let dir = settings.expand(&sc.config_dir);
         let launch = match &sc.command {
-            Some(argv) if !argv.is_empty() => {
-                LaunchSpec { argv_prefix: argv.clone(), ..Default::default() }
-            }
+            Some(argv) if !argv.is_empty() => LaunchSpec {
+                argv_prefix: argv.clone(),
+                ..Default::default()
+            },
             _ => claude_with_dir(&dir),
         };
         let name = sc.name.clone().unwrap_or_else(|| basename(&dir));
-        candidates.push(Candidate { source: source(name, dir, launch), explicit: true });
+        candidates.push(Candidate {
+            source: source(name, dir, launch),
+            explicit: true,
+        });
     }
 
     for dir in &settings.cli_config_dirs {
@@ -128,7 +151,11 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
     }
 
     let mut seen = HashSet::new();
-    for Candidate { mut source, explicit } in candidates {
+    for Candidate {
+        mut source,
+        explicit,
+    } in candidates
+    {
         match std::fs::canonicalize(&source.config_dir) {
             Ok(canonical) if canonical.is_dir() => {
                 if seen.insert(canonical.clone()) {
@@ -156,7 +183,10 @@ mod tests {
     const CCS_YAML: &str = "default: \"c2\"\naccounts:\n  c1:\n    created: \"2026-01-01\"\n  c2:\n    created: \"2026-01-02\"\n  c3: {}\nprofiles: {}\n";
 
     fn settings(home: &Path) -> Settings {
-        Settings { home: home.to_path_buf(), ..Default::default() }
+        Settings {
+            home: home.to_path_buf(),
+            ..Default::default()
+        }
     }
 
     fn setup_ccs(home: &Path) {
@@ -201,7 +231,8 @@ mod tests {
         setup_ccs(tmp.path());
         let mut s = settings(tmp.path());
         let c1 = tmp.path().join(".ccs/instances/c1");
-        s.env.insert(ENV_CONFIG_DIR.into(), c1.display().to_string());
+        s.env
+            .insert(ENV_CONFIG_DIR.into(), c1.display().to_string());
         assert_eq!(names(&discover(&s).unwrap()), vec!["c2", "c1", "c3"]);
     }
 
@@ -211,7 +242,8 @@ mod tests {
         let dir = tmp.path().join("alt-claude");
         fs::create_dir_all(&dir).unwrap();
         let mut s = settings(tmp.path());
-        s.env.insert(ENV_CONFIG_DIR.into(), dir.display().to_string());
+        s.env
+            .insert(ENV_CONFIG_DIR.into(), dir.display().to_string());
         let d = discover(&s).unwrap();
         assert_eq!(names(&d), vec!["alt-claude"]);
         assert_eq!(d.sources[0].launch.argv_prefix, vec!["claude"]);
@@ -227,7 +259,10 @@ mod tests {
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         let d = discover(&settings(tmp.path())).unwrap();
         assert_eq!(names(&d), vec!["claude"]);
-        assert_eq!(d.sources[0].launch.env_remove, vec![ENV_CONFIG_DIR.to_string()]);
+        assert_eq!(
+            d.sources[0].launch.env_remove,
+            vec![ENV_CONFIG_DIR.to_string()]
+        );
     }
 
     #[test]

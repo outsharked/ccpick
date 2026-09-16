@@ -28,7 +28,10 @@ pub fn highlight(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
         if start > pos {
             spans.push(Span::styled(text[pos..start].to_string(), base));
         }
-        spans.push(Span::styled(text[start..end].to_string(), base.fg(Color::Black).bg(Color::Yellow)));
+        spans.push(Span::styled(
+            text[start..end].to_string(),
+            base.fg(Color::Black).bg(Color::Yellow),
+        ));
         pos = end;
     }
     if pos < text.len() {
@@ -49,8 +52,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64, home: &Path) {
     let inner = outer.inner(frame.area());
     frame.render_widget(outer, frame.area());
 
-    let [query_area, body, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let [query_area, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::new().fg(Color::Cyan)),
@@ -84,12 +91,24 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path)
                 let marker = if s.live.is_some() { "● " } else { "  " };
                 let title = Line::from(vec![
                     Span::styled(marker, Style::new().fg(Color::Green)),
-                    Span::styled(s.meta.title.clone(), Style::new().add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        s.meta.title.clone(),
+                        Style::new().add_modifier(Modifier::BOLD),
+                    ),
                 ]);
                 let second = match snippet {
-                    Some(text) => Line::from(highlight(&format!("  {text}"), &app.query, Style::new().dim())),
+                    Some(text) => Line::from(highlight(
+                        &format!("  {text}"),
+                        &app.query,
+                        Style::new().dim(),
+                    )),
                     None => {
-                        let cwd = s.meta.cwd.as_deref().map(|p| shorten_home(p, home)).unwrap_or_else(|| "?".into());
+                        let cwd = s
+                            .meta
+                            .cwd
+                            .as_deref()
+                            .map(|p| shorten_home(p, home))
+                            .unwrap_or_else(|| "?".into());
                         let mut detail = format!(
                             "  {cwd} · {} · {}",
                             catalog.sources[app.launch_source(*idx)].name,
@@ -103,14 +122,19 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path)
                 };
                 let item = ListItem::new(vec![title, second]);
                 let cwd_missing = s.meta.cwd.as_deref().is_none_or(|p| !p.is_dir());
-                if cwd_missing { item.style(Style::new().add_modifier(Modifier::DIM)) } else { item }
+                if cwd_missing {
+                    item.style(Style::new().add_modifier(Modifier::DIM))
+                } else {
+                    item
+                }
             }
         })
         .collect();
     let list = List::new(items)
         .block(Block::default().borders(Borders::RIGHT))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    let mut state = ListState::default().with_selected(app.selected_session().map(|_| app.selected));
+    let mut state =
+        ListState::default().with_selected(app.selected_session().map(|_| app.selected));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -127,9 +151,17 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
     let offset = app.preview_offset;
     let messages = app.preview_messages();
 
-    let cwd = session.meta.cwd.as_deref().map(|p| shorten_home(p, home)).unwrap_or_else(|| "?".into());
+    let cwd = session
+        .meta
+        .cwd
+        .as_deref()
+        .map(|p| shorten_home(p, home))
+        .unwrap_or_else(|| "?".into());
     let mut lines = vec![
-        Line::from(format!("{cwd} · {} · {source_name}", session.meta.branch.as_deref().unwrap_or("-"))),
+        Line::from(format!(
+            "{cwd} · {} · {source_name}",
+            session.meta.branch.as_deref().unwrap_or("-")
+        )),
         Line::from(format!(
             "{} msgs · last {} · {}",
             session.meta.msg_count,
@@ -145,11 +177,16 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
         let content_width = area.width.saturating_sub(2) as usize;
         // Rows available for messages: pane height minus the header lines above.
         let available = (area.height as usize).saturating_sub(PREVIEW_HEADER_LINES);
-        let heights: Vec<usize> = messages.iter().map(|m| message_height(&m.text, content_width)).collect();
+        let heights: Vec<usize> = messages
+            .iter()
+            .map(|m| message_height(&m.text, content_width))
+            .collect();
         let last = messages.len() - 1;
         // Default anchor keeps the newest message visible by walking backwards
         // from the end; a text-search hit anchors at the hit instead.
-        let anchor = hit_index.unwrap_or_else(|| tail_start(&heights, available)).min(last) as isize;
+        let anchor = hit_index
+            .unwrap_or_else(|| tail_start(&heights, available))
+            .min(last) as isize;
         let start = (anchor + offset).clamp(0, last as isize) as usize;
         // Bound how many messages we build lines for, so an early hit in a long
         // conversation doesn't render every message up to the end each frame.
@@ -164,7 +201,10 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
             for (i, text_line) in message.text.lines().enumerate() {
                 let mut spans = Vec::new();
                 if i == 0 {
-                    spans.push(Span::styled(name.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(
+                        name.clone(),
+                        Style::new().fg(color).add_modifier(Modifier::BOLD),
+                    ));
                 }
                 spans.extend(highlight(text_line, &query, Style::new()));
                 lines.push(Line::from(spans));
@@ -186,7 +226,10 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
 /// row), plus one blank separator row rendered after the message.
 fn message_height(text: &str, content_width: usize) -> usize {
     let width = content_width.max(1);
-    let text_height: usize = text.lines().map(|line| line.chars().count().div_ceil(width).max(1)).sum();
+    let text_height: usize = text
+        .lines()
+        .map(|line| line.chars().count().div_ceil(width).max(1))
+        .sum();
     text_height + 1
 }
 
@@ -194,7 +237,9 @@ fn message_height(text: &str, content_width: usize) -> usize {
 /// accumulated height still fits within `available` rows. Always includes
 /// the last message, even if its height alone exceeds `available`.
 fn tail_start(heights: &[usize], available: usize) -> usize {
-    let Some(last) = heights.len().checked_sub(1) else { return 0 };
+    let Some(last) = heights.len().checked_sub(1) else {
+        return 0;
+    };
     let mut start = last;
     let mut total = heights[last];
     while start > 0 && total + heights[start - 1] <= available {
@@ -231,8 +276,16 @@ mod tests {
 
     fn screen(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|f| draw(f, app, 10_000, Path::new("/home/x"))).unwrap();
-        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+        terminal
+            .draw(|f| draw(f, app, 10_000, Path::new("/home/x")))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
     }
 
     #[test]
@@ -314,15 +367,28 @@ mod tests {
             (MsgRole::User, "LAST-MESSAGE-MARKER"),
         ];
         p.add_session("/s", "a", "Long convo", 1000, 1000, &messages);
-        Catalog::build(vec![Box::new(p)], &Settings::default(), &mut Cache::in_memory()).unwrap()
+        Catalog::build(
+            vec![Box::new(p)],
+            &Settings::default(),
+            &mut Cache::in_memory(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn preview_keeps_newest_message_visible() {
         let mut app = App::new(Arc::new(catalog_with_long_tail()), "");
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        terminal.draw(|f| draw(f, &mut app, 10_000, Path::new("/home/x"))).unwrap();
-        let text: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        terminal
+            .draw(|f| draw(f, &mut app, 10_000, Path::new("/home/x")))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("LAST-MESSAGE-MARKER"));
     }
 }

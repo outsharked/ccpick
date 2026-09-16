@@ -52,9 +52,16 @@ impl Catalog {
         for (si, source) in sources.iter().enumerate() {
             let pi = source_provider[si];
             match providers[pi].store_for(source) {
-                Some(path) => match stores.iter_mut().find(|s| s.provider == pi && s.path == path) {
+                Some(path) => match stores
+                    .iter_mut()
+                    .find(|s| s.provider == pi && s.path == path)
+                {
                     Some(store) => store.sources.push(si),
-                    None => stores.push(Store { provider: pi, path, sources: vec![si] }),
+                    None => stores.push(Store {
+                        provider: pi,
+                        path,
+                        sources: vec![si],
+                    }),
                 },
                 None => warnings.push(format!("source {} has no session store", source.name)),
             }
@@ -70,7 +77,10 @@ impl Catalog {
                 if record.alive {
                     live.insert(k.clone(), (record.pid, si));
                 }
-                launches.entry(k).or_default().push((record.started_at_ms, si));
+                launches
+                    .entry(k)
+                    .or_default()
+                    .push((record.started_at_ms, si));
             }
         }
 
@@ -102,7 +112,11 @@ impl Catalog {
                 // Newest launch through a source that can see this store; else the first such source.
                 let default_source = launches
                     .get(&k)
-                    .and_then(|l| l.iter().filter(|(_, si)| store.sources.contains(si)).max_by_key(|(ts, _)| *ts))
+                    .and_then(|l| {
+                        l.iter()
+                            .filter(|(_, si)| store.sources.contains(si))
+                            .max_by_key(|(ts, _)| *ts)
+                    })
                     .map(|(_, si)| *si)
                     .unwrap_or(store.sources[0]);
                 sessions.push(Session {
@@ -116,7 +130,13 @@ impl Catalog {
         }
         sessions.sort_by(|a, b| b.meta.last_ts.cmp(&a.meta.last_ts));
 
-        Ok(Catalog { providers, sources, stores, sessions, warnings })
+        Ok(Catalog {
+            providers,
+            sources,
+            stores,
+            sessions,
+            warnings,
+        })
     }
 
     pub fn messages(&self, idx: usize) -> Vec<Message> {
@@ -147,16 +167,40 @@ pub fn fake_catalog() -> Catalog {
     p.add_source("one", "/s");
     p.add_source("two", "/s");
     p.add_source("three", "/t");
-    p.add_session("/s", "a", "Docker build cache", 3000, 3000, &[(Role::User, "fix docker"), (Role::Assistant, "done")]);
-    p.add_session("/s", "b", "Kubernetes ingress", 2000, 2000, &[(Role::User, "the ingress needs a PINEAPPLE annotation")]);
+    p.add_session(
+        "/s",
+        "a",
+        "Docker build cache",
+        3000,
+        3000,
+        &[(Role::User, "fix docker"), (Role::Assistant, "done")],
+    );
+    p.add_session(
+        "/s",
+        "b",
+        "Kubernetes ingress",
+        2000,
+        2000,
+        &[(Role::User, "the ingress needs a PINEAPPLE annotation")],
+    );
     p.add_session("/s", "c", "Running thing", 1000, 1000, &[]);
     p.add_session("/t", "d", "Old notes", 9000, 500, &[]);
     p.set_cwd("/t", "d", Some("/nonexistent/ccpick-test"));
     p.records.insert(
         "two".into(),
-        vec![LaunchRecord { pid: 4242, session_id: "c".into(), started_at_ms: 5, alive: true }],
+        vec![LaunchRecord {
+            pid: 4242,
+            session_id: "c".into(),
+            started_at_ms: 5,
+            alive: true,
+        }],
     );
-    Catalog::build(vec![Box::new(p)], &Settings::default(), &mut Cache::in_memory()).unwrap()
+    Catalog::build(
+        vec![Box::new(p)],
+        &Settings::default(),
+        &mut Cache::in_memory(),
+    )
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -197,11 +241,21 @@ mod tests {
         p.add_source("two", "/s");
         p.add_source("other", "/o");
         p.add_session("/s", "x", "X", 1, 1, &[]);
-        let rec = |ts| LaunchRecord { pid: 1, session_id: "x".into(), started_at_ms: ts, alive: false };
+        let rec = |ts| LaunchRecord {
+            pid: 1,
+            session_id: "x".into(),
+            started_at_ms: ts,
+            alive: false,
+        };
         p.records.insert("one".into(), vec![rec(10)]);
         p.records.insert("two".into(), vec![rec(20)]);
         p.records.insert("other".into(), vec![rec(30)]);
-        let c = Catalog::build(vec![Box::new(p)], &Settings::default(), &mut Cache::in_memory()).unwrap();
+        let c = Catalog::build(
+            vec![Box::new(p)],
+            &Settings::default(),
+            &mut Cache::in_memory(),
+        )
+        .unwrap();
         // "other" has the newest record but can't see store /s; "two" is newest among eligible.
         assert_eq!(c.sessions[0].default_source, 1);
         assert_eq!(c.sessions[0].live, None);
@@ -210,8 +264,14 @@ mod tests {
     #[test]
     fn launch_plan_and_messages_delegate() {
         let c = fake_catalog();
-        assert_eq!(c.launch_plan(0, 1).argv, vec!["fake", "two", "--resume", "a"]);
-        assert_eq!(c.messages(1)[0].text, "the ingress needs a PINEAPPLE annotation");
+        assert_eq!(
+            c.launch_plan(0, 1).argv,
+            vec!["fake", "two", "--resume", "a"]
+        );
+        assert_eq!(
+            c.messages(1)[0].text,
+            "the ingress needs a PINEAPPLE annotation"
+        );
         assert!(c.may_contain(1, "anything"));
     }
 
@@ -220,7 +280,12 @@ mod tests {
         let mut p = FakeProvider::default();
         p.add_source("one", "/s");
         p.stores.clear();
-        let c = Catalog::build(vec![Box::new(p)], &Settings::default(), &mut Cache::in_memory()).unwrap();
+        let c = Catalog::build(
+            vec![Box::new(p)],
+            &Settings::default(),
+            &mut Cache::in_memory(),
+        )
+        .unwrap();
         assert!(c.sessions.is_empty());
         assert_eq!(c.warnings.len(), 1);
     }
@@ -232,11 +297,15 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         let file = proj.join("basic.jsonl");
         std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/basic.jsonl"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/claude/basic.jsonl"),
             &file,
         )
         .unwrap();
-        let settings = Settings { home: tmp.path().to_path_buf(), ..Default::default() };
+        let settings = Settings {
+            home: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         let mut cache = Cache::in_memory();
 
         let c1 = Catalog::build(vec![Box::new(ClaudeProvider)], &settings, &mut cache).unwrap();
@@ -247,7 +316,12 @@ mod tests {
         let canonical = std::fs::canonicalize(&file).unwrap();
         let mut planted = c1.sessions[0].meta.clone();
         planted.title = "CACHED".into();
-        cache.put("claude", &canonical, Stamp::of(&canonical).unwrap(), planted);
+        cache.put(
+            "claude",
+            &canonical,
+            Stamp::of(&canonical).unwrap(),
+            planted,
+        );
         let c2 = Catalog::build(vec![Box::new(ClaudeProvider)], &settings, &mut cache).unwrap();
         assert_eq!(c2.sessions[0].meta.title, "CACHED");
     }

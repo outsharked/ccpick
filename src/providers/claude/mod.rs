@@ -11,13 +11,17 @@ pub struct ClaudeProvider;
 /// `<store>/<project>/<session>.jsonl`, following symlinked project dirs, skipping deeper files.
 pub fn list_jsonl(store: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(projects) = std::fs::read_dir(store) else { return out };
+    let Ok(projects) = std::fs::read_dir(store) else {
+        return out;
+    };
     for project in projects.flatten() {
         let dir = project.path();
         if !dir.is_dir() {
             continue;
         }
-        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for file in files.flatten() {
             let path = file.path();
             if path.extension().is_some_and(|e| e == "jsonl") && path.is_file() {
@@ -43,7 +47,9 @@ pub fn launch_plan(source: &Source, session: &SessionMeta) -> LaunchPlan {
 
 fn is_simple_needle(needle: &str) -> bool {
     !needle.is_empty()
-        && needle.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'-' | b'_' | b'.'))
+        && needle
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'-' | b'_' | b'.'))
 }
 
 impl Provider for ClaudeProvider {
@@ -54,7 +60,9 @@ impl Provider for ClaudeProvider {
         sources::discover(settings)
     }
     fn store_for(&self, source: &Source) -> Option<PathBuf> {
-        std::fs::canonicalize(source.config_dir.join("projects")).ok().filter(|p| p.is_dir())
+        std::fs::canonicalize(source.config_dir.join("projects"))
+            .ok()
+            .filter(|p| p.is_dir())
     }
     fn list_session_files(&self, store: &Path) -> Vec<PathBuf> {
         list_jsonl(store)
@@ -152,7 +160,10 @@ mod tests {
         let m = meta("abc", "/work/proj");
 
         let ccs = launch_plan(
-            &mk(LaunchSpec { argv_prefix: vec!["ccs".into(), "c1".into()], ..Default::default() }),
+            &mk(LaunchSpec {
+                argv_prefix: vec!["ccs".into(), "c1".into()],
+                ..Default::default()
+            }),
             &m,
         );
         assert_eq!(ccs.argv, vec!["ccs", "c1", "--resume", "abc"]);
@@ -177,12 +188,16 @@ mod tests {
             }),
             &m,
         );
-        assert_eq!(dir.env_set, vec![("CLAUDE_CONFIG_DIR".to_string(), "/alt".to_string())]);
+        assert_eq!(
+            dir.env_set,
+            vec![("CLAUDE_CONFIG_DIR".to_string(), "/alt".to_string())]
+        );
     }
 
     #[test]
     fn may_contain_prefilters_raw_bytes() {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/basic.jsonl");
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/basic.jsonl");
         let p = ClaudeProvider;
         assert!(p.may_contain(&fixture, "dockerfile"));
         assert!(!p.may_contain(&fixture, "zzzzqqq"));
@@ -193,6 +208,9 @@ mod tests {
     #[test]
     fn registry_contains_claude() {
         let all = crate::providers::all();
-        assert_eq!(all.iter().map(|p| p.id()).collect::<Vec<_>>(), vec!["claude"]);
+        assert_eq!(
+            all.iter().map(|p| p.id()).collect::<Vec<_>>(),
+            vec!["claude"]
+        );
     }
 }

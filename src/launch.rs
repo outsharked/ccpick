@@ -32,7 +32,9 @@ pub fn find_in_path(program: &str) -> Option<PathBuf> {
         return is_executable(&path).then_some(path);
     }
     let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths).map(|dir| dir.join(program)).find(is_executable)
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(program))
+        .find(is_executable)
 }
 
 #[cfg(test)]
@@ -50,7 +52,10 @@ mod tests {
         };
         let cmd = command(&plan);
         assert_eq!(cmd.get_program(), OsStr::new("claude"));
-        assert_eq!(cmd.get_args().collect::<Vec<_>>(), vec![OsStr::new("--resume"), OsStr::new("abc")]);
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--resume"), OsStr::new("abc")]
+        );
         assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new("/work")));
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(envs.contains(&(OsStr::new("OTHER"), None)));

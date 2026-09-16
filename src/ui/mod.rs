@@ -46,7 +46,9 @@ fn event_loop(
         if !event::poll(TICK)? {
             continue;
         }
-        let Event::Key(key) = event::read()? else { continue };
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
         if key.kind != KeyEventKind::Press {
             continue;
         }

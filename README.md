@@ -31,6 +31,8 @@ conversation text appear below a divider shortly after.
 | `Ctrl-R` | Running sessions only |
 | `Ctrl-S` | Sort by last activity / created |
 | `Tab` | Focus preview (arrows scroll messages) |
+| `↑` / `↓` | Move selection (list) or scroll one message (preview) |
+| `PgUp` / `PgDn` | Move/scroll 10 at a time |
 | `Esc` / `Ctrl-C` | Quit |
 
 ## Sources

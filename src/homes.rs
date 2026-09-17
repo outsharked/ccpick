@@ -148,6 +148,13 @@ pub fn wsl_homes_in(distros: &[(String, PathBuf)], markers: &[&str]) -> Vec<Home
     homes
 }
 
+/// Whether `\\wsl.localhost\<distro>` itself can be listed at all — a distro that isn't
+/// installed (e.g. a typo in `wsl_distros`, or one that's been uninstalled) fails here, as
+/// opposed to a real, readable distro that simply has no ccpick-relevant home directories.
+fn has_readable_root(distro: &str) -> bool {
+    linux_to_unc("/", distro).is_some_and(|root| std::fs::read_dir(root).is_ok())
+}
+
 /// WSL homes in the named distros, via `\\wsl.localhost\<distro>`.
 pub fn wsl_homes(distros: &[String], markers: &[&str]) -> Vec<Home> {
     let roots: Vec<(String, PathBuf)> = distros
@@ -182,6 +189,11 @@ pub fn discover_homes(
                 }
             }
             homes.extend(wsl_homes(&distros, markers));
+            for forced in &settings.file.environments.wsl_distros {
+                if !has_readable_root(forced) {
+                    warnings.push(format!("WSL distro {forced} from wsl_distros not found"));
+                }
+            }
         }
         Env::Linux | Env::MacOs => {}
     }
@@ -264,6 +276,25 @@ mod tests {
         let labels: Vec<_> = two.iter().filter_map(|h| h.label.clone()).collect();
         assert!(labels.contains(&"Ubuntu".to_string()));
         assert!(labels.contains(&"Debian".to_string()));
+    }
+
+    #[test]
+    fn forced_distro_with_no_readable_root_warns() {
+        let settings = Settings {
+            home: PathBuf::from("/fake-home"),
+            host: HostContext {
+                env: Env::Windows,
+                wsl_mount_root: PathBuf::from("/mnt/"),
+            },
+            file: parse_config("[environments]\nwsl_distros = [\"Ghost\"]\n").unwrap(),
+            ..Default::default()
+        };
+        let (homes, warnings) = discover_homes(&settings, MARKERS, || Ok(Vec::new()));
+        assert!(homes.iter().all(|h| h.is_native()));
+        assert_eq!(
+            warnings,
+            vec!["WSL distro Ghost from wsl_distros not found".to_string()]
+        );
     }
 
     #[test]

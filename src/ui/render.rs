@@ -565,9 +565,6 @@ mod tests {
     }
 
     fn catalog_with_long_tail() -> crate::catalog::Catalog {
-        use crate::cache::Cache;
-        use crate::catalog::Catalog;
-        use crate::config::Settings;
         use crate::model::Role as MsgRole;
         use crate::providers::fake::FakeProvider;
 
@@ -582,12 +579,7 @@ mod tests {
             (MsgRole::User, "LAST-MESSAGE-MARKER"),
         ];
         p.add_session("/s", "a", "Long convo", 1000, 1000, &messages);
-        Catalog::build(
-            vec![Box::new(p)],
-            &Settings::default(),
-            &mut Cache::in_memory(),
-        )
-        .unwrap()
+        crate::catalog::build_fake(p)
     }
 
     #[test]
@@ -608,9 +600,6 @@ mod tests {
     }
 
     fn catalog_with_wrapped_last_message() -> crate::catalog::Catalog {
-        use crate::cache::Cache;
-        use crate::catalog::Catalog;
-        use crate::config::Settings;
         use crate::model::Role as MsgRole;
         use crate::providers::fake::FakeProvider;
 
@@ -630,12 +619,7 @@ mod tests {
             (MsgRole::Assistant, prose),
         ];
         p.add_session("/s", "a", "Wrapped convo", 1000, 1000, &messages);
-        Catalog::build(
-            vec![Box::new(p)],
-            &Settings::default(),
-            &mut Cache::in_memory(),
-        )
-        .unwrap()
+        crate::catalog::build_fake(p)
     }
 
     #[test]

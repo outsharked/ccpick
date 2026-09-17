@@ -195,15 +195,21 @@ pub fn messages(path: &Path) -> Vec<Message> {
     out
 }
 
+/// Path of a test fixture under `tests/fixtures/claude/`.
+#[cfg(test)]
+pub fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude")
+        .join(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/claude")
-            .join(name)
+        fixture_path(name)
     }
 
     #[test]

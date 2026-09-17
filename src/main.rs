@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ccpick::cache::{Cache, default_cache_path};
 use ccpick::catalog::Catalog;
-use ccpick::{config, launch, providers, report, ui};
+use ccpick::{config, homes, launch, providers, report, ui};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -46,7 +46,14 @@ fn run() -> Result<i32> {
         (false, Some(path)) => Cache::load(path),
         _ => Cache::in_memory(),
     };
-    let catalog = Catalog::build(providers::all(), &settings, &mut cache)?;
+    let providers = providers::all();
+    let markers: Vec<&str> = providers
+        .iter()
+        .flat_map(|p| p.home_markers().iter().copied())
+        .collect();
+    let (homes, home_warnings) = homes::discover_homes(&settings, &markers, homes::running_distros);
+    let mut catalog = Catalog::build(providers, &settings, &homes, &mut cache)?;
+    catalog.warnings.extend(home_warnings);
     if let Err(err) = cache.save() {
         eprintln!("ccpick: warning: could not write cache: {err}");
     }

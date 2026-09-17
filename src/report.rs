@@ -13,7 +13,7 @@ pub fn describe_launch(spec: &LaunchSpec) -> String {
     parts.join(" ")
 }
 
-/// agent, name, config dir, store, launch — one line per source, then warnings.
+/// agent, name, env, config dir, store, launch — one line per source, then warnings.
 pub fn sources_report(catalog: &Catalog) -> String {
     let mut out = String::new();
     for (si, source) in catalog.sources.iter().enumerate() {
@@ -25,9 +25,10 @@ pub fn sources_report(catalog: &Catalog) -> String {
             .unwrap_or_else(|| "-".into());
         let _ = writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             source.agent,
             source.name,
+            source.env.id(),
             source.config_dir.display(),
             store,
             describe_launch(&source.launch)
@@ -95,7 +96,7 @@ mod tests {
         let out = sources_report(&fake_catalog());
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[1], "fake\ttwo\t/fake/two\t/s\tfake two");
+        assert_eq!(lines[1], "fake\ttwo\tlinux\t/fake/two\t/s\tfake two");
     }
 
     #[test]

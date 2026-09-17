@@ -23,6 +23,7 @@ pub struct Store {
 }
 
 pub struct Catalog {
+    pub host: crate::env::HostContext,
     pub providers: Vec<Box<dyn Provider>>,
     pub sources: Vec<Source>,
     pub stores: Vec<Store>,
@@ -34,18 +35,20 @@ impl Catalog {
     pub fn build(
         providers: Vec<Box<dyn Provider>>,
         settings: &Settings,
+        homes: &[crate::homes::Home],
         cache: &mut Cache,
     ) -> anyhow::Result<Catalog> {
         let mut sources = Vec::new();
         let mut source_provider = Vec::new();
         let mut warnings = Vec::new();
-        for (pi, provider) in providers.iter().enumerate() {
-            let home = crate::homes::Home::native(&settings.host, settings.home.clone());
-            let discovery = provider.discover_sources(settings, &home)?;
-            warnings.extend(discovery.warnings);
-            for source in discovery.sources {
-                sources.push(source);
-                source_provider.push(pi);
+        for home in homes {
+            for (pi, provider) in providers.iter().enumerate() {
+                let discovery = provider.discover_sources(settings, home)?;
+                warnings.extend(discovery.warnings);
+                for source in discovery.sources {
+                    sources.push(source);
+                    source_provider.push(pi);
+                }
             }
         }
 
@@ -145,12 +148,24 @@ impl Catalog {
         sessions.sort_by_key(|s| std::cmp::Reverse(s.meta.last_ts));
 
         Ok(Catalog {
+            host: settings.host.clone(),
             providers,
             sources,
             stores,
             sessions,
             warnings,
         })
+    }
+
+    /// True when ccpick can launch sessions from this source itself.
+    pub fn is_launchable(&self, source: usize) -> bool {
+        self.sources[source].env == self.host.env
+    }
+
+    /// The session's project dir as a path ccpick can check on disk.
+    pub fn host_cwd(&self, idx: usize, source: usize) -> Option<PathBuf> {
+        let cwd = self.sessions[idx].meta.cwd.as_ref()?;
+        self.host.to_host(cwd, &self.sources[source].env)
     }
 
     pub fn messages(&self, idx: usize) -> Vec<Message> {
@@ -209,12 +224,68 @@ pub fn fake_catalog() -> Catalog {
             alive: true,
         }],
     );
+    build_fake(p)
+}
+
+#[cfg(test)]
+pub fn build_fake(p: crate::providers::fake::FakeProvider) -> Catalog {
+    build_fake_on(p, crate::env::HostContext::default())
+}
+
+#[cfg(test)]
+pub fn build_fake_on(
+    p: crate::providers::fake::FakeProvider,
+    host: crate::env::HostContext,
+) -> Catalog {
+    let settings = Settings {
+        host,
+        ..Default::default()
+    };
+    let homes = [crate::homes::Home::native(&settings.host, "/fake".into())];
     Catalog::build(
         vec![Box::new(p)],
-        &Settings::default(),
+        &settings,
+        &homes,
         &mut Cache::in_memory(),
     )
     .unwrap()
+}
+
+#[cfg(test)]
+pub fn fake_catalog_with_foreign() -> Catalog {
+    use crate::env::{Env, HostContext};
+    use crate::model::Role;
+    use crate::providers::fake::FakeProvider;
+    let ubuntu = Env::Wsl {
+        distro: "Ubuntu".into(),
+    };
+    let mut p = FakeProvider::default();
+    p.add_source_in("one", "/s", ubuntu.clone(), "/fake");
+    p.add_source_in("win:c1", "/w", Env::Windows, r"C:\Users\me");
+    p.add_session(
+        "/s",
+        "n",
+        "Native session",
+        2000,
+        2000,
+        &[(Role::User, "hello")],
+    );
+    p.add_session(
+        "/w",
+        "w",
+        "Windows session",
+        1000,
+        1000,
+        &[(Role::User, "from windows")],
+    );
+    p.set_cwd("/w", "w", Some(r"C:\Users\me\proj"));
+    build_fake_on(
+        p,
+        HostContext {
+            env: ubuntu,
+            wsl_mount_root: PathBuf::from("/nonexistent-root/"),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -264,12 +335,7 @@ mod tests {
         p.records.insert("one".into(), vec![rec(10)]);
         p.records.insert("two".into(), vec![rec(20)]);
         p.records.insert("other".into(), vec![rec(30)]);
-        let c = Catalog::build(
-            vec![Box::new(p)],
-            &Settings::default(),
-            &mut Cache::in_memory(),
-        )
-        .unwrap();
+        let c = build_fake(p);
         // "other" has the newest record but can't see store /s; "two" is newest among eligible.
         assert_eq!(c.sessions[0].default_source, 1);
         assert_eq!(c.sessions[0].live, None);
@@ -294,12 +360,7 @@ mod tests {
         let mut p = FakeProvider::default();
         p.add_source("one", "/s");
         p.stores.clear();
-        let c = Catalog::build(
-            vec![Box::new(p)],
-            &Settings::default(),
-            &mut Cache::in_memory(),
-        )
-        .unwrap();
+        let c = build_fake(p);
         assert!(c.sessions.is_empty());
         assert_eq!(c.warnings.len(), 1);
     }
@@ -315,7 +376,17 @@ mod tests {
             .unwrap(),
             ..Default::default()
         };
-        let c = Catalog::build(vec![Box::new(p)], &settings, &mut Cache::in_memory()).unwrap();
+        let homes = [crate::homes::Home::native(
+            &settings.host,
+            settings.home.clone(),
+        )];
+        let c = Catalog::build(
+            vec![Box::new(p)],
+            &settings,
+            &homes,
+            &mut Cache::in_memory(),
+        )
+        .unwrap();
         assert_eq!(c.warnings.len(), 1);
         assert!(c.warnings[0].contains("ghost"));
         assert!(c.warnings[0].contains("unknown agent"));
@@ -339,8 +410,18 @@ mod tests {
             ..Default::default()
         };
         let mut cache = Cache::in_memory();
+        let homes = [crate::homes::Home::native(
+            &settings.host,
+            settings.home.clone(),
+        )];
 
-        let c1 = Catalog::build(vec![Box::new(ClaudeProvider)], &settings, &mut cache).unwrap();
+        let c1 = Catalog::build(
+            vec![Box::new(ClaudeProvider)],
+            &settings,
+            &homes,
+            &mut cache,
+        )
+        .unwrap();
         assert_eq!(c1.sessions[0].meta.title, "Docker build cache fix");
         assert_eq!(cache.len(), 1);
 
@@ -354,7 +435,69 @@ mod tests {
             Stamp::of(&canonical).unwrap(),
             planted,
         );
-        let c2 = Catalog::build(vec![Box::new(ClaudeProvider)], &settings, &mut cache).unwrap();
+        let c2 = Catalog::build(
+            vec![Box::new(ClaudeProvider)],
+            &settings,
+            &homes,
+            &mut cache,
+        )
+        .unwrap();
         assert_eq!(c2.sessions[0].meta.title, "CACHED");
+    }
+
+    #[test]
+    fn foreign_sources_are_not_launchable_and_cwd_translates() {
+        let c = fake_catalog_with_foreign();
+        let w = c.sessions.iter().position(|s| s.meta.id == "w").unwrap();
+        let n = c.sessions.iter().position(|s| s.meta.id == "n").unwrap();
+        assert!(c.is_launchable(c.sessions[n].default_source));
+        assert!(!c.is_launchable(c.sessions[w].default_source));
+        assert_eq!(
+            c.host_cwd(w, c.sessions[w].default_source),
+            Some(PathBuf::from("/nonexistent-root/c/Users/me/proj"))
+        );
+        assert_eq!(
+            c.host_cwd(n, c.sessions[n].default_source),
+            Some(PathBuf::from("/tmp"))
+        );
+    }
+
+    #[test]
+    fn scans_every_home() {
+        use crate::homes::Home;
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in ["native/.claude/projects/p", "win/.claude/projects/p"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        let fixture = crate::providers::claude::transcript::fixture_path("basic.jsonl");
+        std::fs::copy(
+            &fixture,
+            tmp.path().join("native/.claude/projects/p/a.jsonl"),
+        )
+        .unwrap();
+        std::fs::copy(&fixture, tmp.path().join("win/.claude/projects/p/b.jsonl")).unwrap();
+        let settings = Settings {
+            home: tmp.path().join("native"),
+            ..Default::default()
+        };
+        let homes = [
+            Home::native(&settings.host, settings.home.clone()),
+            Home {
+                env: crate::env::Env::Windows,
+                dir: tmp.path().join("win"),
+                env_dir: PathBuf::from(r"C:\Users\me"),
+                label: Some("win".into()),
+            },
+        ];
+        let c = Catalog::build(
+            vec![Box::new(ClaudeProvider)],
+            &settings,
+            &homes,
+            &mut Cache::in_memory(),
+        )
+        .unwrap();
+        let names: Vec<&str> = c.sources.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["claude", "win:claude"]);
+        assert_eq!(c.sessions.len(), 2);
     }
 }

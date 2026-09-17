@@ -291,16 +291,25 @@ impl App {
         let Some(idx) = self.selected_session() else {
             return;
         };
+        self.status = Some(match self.cycle_source_for(idx) {
+            Ok(next) => format!("resume via {}", self.catalog.sources[next].name),
+            Err(msg) => msg.into(),
+        });
+    }
+
+    /// Moves `idx`'s resume source to the next one in its list. Doesn't touch `status`, so it
+    /// can be reused by the in-dialog Ctrl-A path, which reports the outcome in the dialog's own
+    /// `note` instead.
+    fn cycle_source_for(&mut self, idx: usize) -> Result<usize, &'static str> {
         let sources = &self.catalog.sessions[idx].sources;
         if sources.len() < 2 {
-            self.status = Some("no other source can resume this session".into());
-            return;
+            return Err("no other source can resume this session");
         }
         let current = self.launch_source(idx);
         let pos = sources.iter().position(|s| *s == current).unwrap_or(0);
         let next = sources[(pos + 1) % sources.len()];
         self.source_override.insert(idx, next);
-        self.status = Some(format!("resume via {}", self.catalog.sources[next].name));
+        Ok(next)
     }
 
     pub fn set_copy_result(&mut self, result: Result<&'static str, String>) {
@@ -343,8 +352,14 @@ impl App {
             },
             (KeyCode::Char('a'), true) => {
                 if let Some(idx) = self.dialog.as_ref().map(|d| d.session) {
-                    self.cycle_source();
+                    let note = match self.cycle_source_for(idx) {
+                        Ok(next) => format!("resume via {}", self.catalog.sources[next].name),
+                        Err(msg) => msg.to_string(),
+                    };
                     self.open_dialog(idx);
+                    if let Some(dialog) = &mut self.dialog {
+                        dialog.note = Some(note);
+                    }
                 }
                 Action::None
             }
@@ -632,6 +647,79 @@ mod tests {
             Action::Launch(_)
         ));
         assert!(a.dialog.is_none());
+    }
+
+    /// Like `fake_catalog_with_foreign`, but the Windows session has two Windows sources so
+    /// Ctrl-A inside the dialog has something to cycle between.
+    fn foreign_two_source_app() -> App {
+        use crate::env::{Env, HostContext};
+        use crate::model::Role;
+        use crate::providers::fake::FakeProvider;
+        use std::path::PathBuf;
+
+        let ubuntu = Env::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        let mut p = FakeProvider::default();
+        p.add_source_in("one", "/s", ubuntu.clone(), "/fake");
+        p.add_source_in("win:c1", "/w", Env::Windows, r"C:\Users\me");
+        p.add_source_in("win:c2", "/w", Env::Windows, r"C:\Users\me");
+        p.add_session(
+            "/s",
+            "n",
+            "Native session",
+            2000,
+            2000,
+            &[(Role::User, "hello")],
+        );
+        p.add_session(
+            "/w",
+            "w",
+            "Windows session",
+            1000,
+            1000,
+            &[(Role::User, "from windows")],
+        );
+        p.set_cwd("/w", "w", Some(r"C:\Users\me\proj"));
+        let catalog = crate::catalog::build_fake_on(
+            p,
+            HostContext {
+                env: ubuntu,
+                wsl_mount_root: PathBuf::from("/nonexistent-root/"),
+            },
+        );
+        let mut a = App::new(Arc::new(catalog), "");
+        a.selected = 1; // session "w"
+        a
+    }
+
+    #[test]
+    fn dialog_ctrl_a_cycles_source_and_notes_it_without_touching_status() {
+        let mut a = foreign_two_source_app();
+        a.status = Some("untouched".into());
+        a.handle_key(key(KeyCode::Enter));
+        let before_status = a.status.clone();
+        assert_eq!(a.handle_key(ctrl('a')), Action::None);
+        let d = a.dialog.as_ref().expect("dialog still open");
+        assert!(d.command.contains("win:c2"));
+        assert_eq!(d.note.as_deref(), Some("resume via win:c2"));
+        assert_eq!(a.status, before_status);
+    }
+
+    #[test]
+    fn dialog_ctrl_a_single_source_notes_it_without_touching_status() {
+        let mut a = foreign_app();
+        a.status = Some("untouched".into());
+        a.handle_key(key(KeyCode::Enter));
+        let command_before = a.dialog.as_ref().unwrap().command.clone();
+        assert_eq!(a.handle_key(ctrl('a')), Action::None);
+        let d = a.dialog.as_ref().expect("dialog still open");
+        assert_eq!(d.command, command_before);
+        assert_eq!(
+            d.note.as_deref(),
+            Some("no other source can resume this session")
+        );
+        assert_eq!(a.status.as_deref(), Some("untouched"));
     }
 
     #[test]

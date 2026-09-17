@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 #[derive(Default)]
 pub struct FakeProvider {
     pub sources: Vec<Source>,
+    /// Sources returned for a foreign (non-native) home, keyed by the home's label. Lets tests
+    /// simulate a source that's discoverable from more than one home (e.g. a configured
+    /// `[[source]]` in the native home's pass pointing at the same directory an auto-discovered
+    /// foreign home also finds).
+    pub foreign_sources: HashMap<String, Vec<Source>>,
     pub stores: HashMap<String, PathBuf>,
     pub files: HashMap<PathBuf, (SessionMeta, Vec<Message>)>,
     pub records: HashMap<String, Vec<LaunchRecord>>,
@@ -21,8 +26,35 @@ impl FakeProvider {
 
     /// A source in a specific environment (e.g. Windows seen from WSL).
     pub fn add_source_in(&mut self, name: &str, store: &str, env: crate::env::Env, env_home: &str) {
-        let config_dir = PathBuf::from(format!("/fake/{name}"));
-        self.sources.push(Source {
+        let config_dir = format!("/fake/{name}");
+        let source = Self::build_source(name, &config_dir, env, env_home);
+        self.sources.push(source);
+        self.stores.insert(name.into(), PathBuf::from(store));
+    }
+
+    /// A source returned only when discovering the home labeled `label` (native home sources use
+    /// `add_source`/`add_source_in`), at an explicit `config_dir` so it can collide with another
+    /// home's source for cross-home dedup tests.
+    pub fn add_foreign_source_at(
+        &mut self,
+        label: &str,
+        name: &str,
+        store: &str,
+        env: crate::env::Env,
+        env_home: &str,
+        config_dir: &str,
+    ) {
+        let source = Self::build_source(name, config_dir, env, env_home);
+        self.foreign_sources
+            .entry(label.into())
+            .or_default()
+            .push(source);
+        self.stores.insert(name.into(), PathBuf::from(store));
+    }
+
+    fn build_source(name: &str, config_dir: &str, env: crate::env::Env, env_home: &str) -> Source {
+        let config_dir = PathBuf::from(config_dir);
+        Source {
             agent: "fake".into(),
             name: name.into(),
             env_config_dir: config_dir.clone(),
@@ -33,8 +65,7 @@ impl FakeProvider {
                 argv_prefix: vec!["fake".into(), name.into()],
                 ..Default::default()
             },
-        });
-        self.stores.insert(name.into(), PathBuf::from(store));
+        }
     }
 
     pub fn add_session(
@@ -87,10 +118,9 @@ impl Provider for FakeProvider {
         _settings: &Settings,
         home: &crate::homes::Home,
     ) -> anyhow::Result<Discovery> {
-        let sources = if home.is_native() {
-            self.sources.clone()
-        } else {
-            Vec::new()
+        let sources = match &home.label {
+            None => self.sources.clone(),
+            Some(label) => self.foreign_sources.get(label).cloned().unwrap_or_default(),
         };
         Ok(Discovery {
             sources,

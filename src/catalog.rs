@@ -41,11 +41,20 @@ impl Catalog {
         let mut sources = Vec::new();
         let mut source_provider = Vec::new();
         let mut warnings = Vec::new();
+        // A source already seen (by provider + canonical config_dir) is dropped, keeping the
+        // first: the native home's pass runs first, so a configured `[[source]]` pointing at
+        // another environment's config dir wins over the same directory turning up again via
+        // that environment's own auto-discovered home.
+        let mut seen_config_dirs: std::collections::HashSet<(usize, PathBuf)> =
+            std::collections::HashSet::new();
         for home in homes {
             for (pi, provider) in providers.iter().enumerate() {
                 let discovery = provider.discover_sources(settings, home)?;
                 warnings.extend(discovery.warnings);
                 for source in discovery.sources {
+                    if !seen_config_dirs.insert((pi, source.config_dir.clone())) {
+                        continue;
+                    }
                     sources.push(source);
                     source_provider.push(pi);
                 }
@@ -469,6 +478,43 @@ mod tests {
             c.host_cwd(n, c.sessions[n].default_source),
             Some(PathBuf::from("/tmp"))
         );
+    }
+
+    #[test]
+    fn cross_home_sources_pointing_at_the_same_config_dir_are_deduped() {
+        use crate::env::Env;
+        use crate::homes::Home;
+        let mut p = FakeProvider::default();
+        // Native pass discovers "one"; the "win" home's pass discovers "win:one", a configured
+        // source pointing at the very same underlying directory the foreign home also sees.
+        p.add_source_in("one", "/s", Env::Linux, "/fake");
+        p.add_foreign_source_at(
+            "win",
+            "win:one",
+            "/s",
+            Env::Windows,
+            r"C:\Users\me",
+            "/fake/one",
+        );
+        let settings = Settings::default();
+        let homes = [
+            Home::native(&settings.host, settings.home.clone()),
+            Home {
+                env: Env::Windows,
+                dir: PathBuf::from("/foreign"),
+                env_dir: PathBuf::from(r"C:\Users\me"),
+                label: Some("win".into()),
+            },
+        ];
+        let c = Catalog::build(
+            vec![Box::new(p)],
+            &settings,
+            &homes,
+            &mut Cache::in_memory(),
+        )
+        .unwrap();
+        assert_eq!(c.sources.len(), 1);
+        assert_eq!(c.sources[0].name, "one");
     }
 
     #[test]

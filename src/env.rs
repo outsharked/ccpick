@@ -22,9 +22,16 @@ impl Env {
             "linux" => Some(Env::Linux),
             "windows" => Some(Env::Windows),
             "macos" => Some(Env::MacOs),
-            _ if t.len() > 4 && t[..4].eq_ignore_ascii_case("wsl:") => Some(Env::Wsl {
-                distro: t[4..].to_string(),
-            }),
+            _ if t.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("wsl:")) => {
+                let distro = &t[4..];
+                if distro.is_empty() {
+                    None
+                } else {
+                    Some(Env::Wsl {
+                        distro: distro.to_string(),
+                    })
+                }
+            }
             _ => None,
         }
     }
@@ -310,6 +317,18 @@ mod tests {
             "WSL (Ubuntu)"
         );
         assert_eq!(Env::Windows.shell_name(), "PowerShell");
+    }
+
+    #[test]
+    fn parse_does_not_panic_on_non_ascii() {
+        assert_eq!(Env::parse("wslé"), None);
+        assert_eq!(
+            Env::parse("wsl:é"),
+            Some(Env::Wsl {
+                distro: "é".into()
+            })
+        );
+        assert_eq!(Env::parse("éééé"), None);
     }
 
     #[test]

@@ -84,6 +84,9 @@ pub struct App {
     text_hits: Vec<TextHit>,
     text_generation: u64,
     preview: Option<(usize, Vec<Message>)>,
+    /// `cwd_missing` results, keyed by (session index, source index): an `is_dir()` stat is a
+    /// filesystem call, so it's computed once per pair rather than on every draw.
+    cwd_missing_cache: HashMap<(usize, usize), bool>,
 }
 
 impl App {
@@ -105,6 +108,7 @@ impl App {
             text_hits: Vec::new(),
             text_generation: 0,
             preview: None,
+            cwd_missing_cache: HashMap::new(),
         };
         app.recompute_rows(false);
         // Surface discovery problems (e.g. an unreadable source config) until the first keypress clears them.
@@ -151,6 +155,23 @@ impl App {
         self.preview_scroll
             .unwrap_or(metrics.anchor)
             .min(metrics.max_scroll())
+    }
+
+    /// Whether the session's project dir, resolved through `source`, doesn't exist on disk.
+    /// `None` from `host_cwd` (no path mapping between environments, as opposed to a definite
+    /// missing directory) falls back to whether the session recorded a cwd at all, and is never
+    /// treated as "missing" on its own. Cached per (session, source) since it's a filesystem
+    /// stat, not a pure computation.
+    pub fn cwd_missing(&mut self, idx: usize, source: usize) -> bool {
+        if let Some(&missing) = self.cwd_missing_cache.get(&(idx, source)) {
+            return missing;
+        }
+        let missing = match self.catalog.host_cwd(idx, source) {
+            Some(p) => !p.is_dir(),
+            None => self.catalog.sessions[idx].meta.cwd.is_none(),
+        };
+        self.cwd_missing_cache.insert((idx, source), missing);
+        missing
     }
 
     pub fn preview_messages(&mut self) -> &[Message] {
@@ -325,10 +346,7 @@ impl App {
         let source = self.launch_source(idx);
         let plan = self.catalog.launch_plan(idx, source);
         let command = crate::shell::resume_command(&plan, &self.catalog.sources[source].env);
-        let dir_missing = self
-            .catalog
-            .host_cwd(idx, source)
-            .is_some_and(|p| !p.is_dir());
+        let dir_missing = self.cwd_missing(idx, source);
         self.dialog = Some(ResumeDialog {
             session: idx,
             source,
@@ -384,8 +402,10 @@ impl App {
             self.open_dialog(idx);
             return Action::None;
         }
-        match self.catalog.host_cwd(idx, source) {
-            Some(cwd) if cwd.is_dir() => Action::Launch(self.catalog.launch_plan(idx, source)),
+        let cwd = self.catalog.host_cwd(idx, source);
+        let missing = self.cwd_missing(idx, source);
+        match cwd {
+            Some(_) if !missing => Action::Launch(self.catalog.launch_plan(idx, source)),
             Some(cwd) => {
                 self.status = Some(format!("project dir no longer exists: {}", cwd.display()));
                 Action::None
@@ -828,6 +848,41 @@ mod tests {
         assert_eq!(a.selected, 3);
         a.handle_key(key(KeyCode::Home));
         assert_eq!(a.selected, 0);
+    }
+
+    #[test]
+    fn cwd_missing_is_cached_per_session_and_source() {
+        use crate::providers::fake::FakeProvider;
+        let tmp = tempfile::tempdir().unwrap();
+        let will_appear = tmp.path().join("will-appear");
+        let mut p = FakeProvider::default();
+        p.add_source("one", "/s");
+        p.add_session("/s", "a", "T", 1, 1, &[]);
+        p.set_cwd("/s", "a", Some(will_appear.to_str().unwrap()));
+        let mut a = App::new(Arc::new(crate::catalog::build_fake(p)), "");
+        assert!(a.cwd_missing(0, 0), "doesn't exist yet");
+        std::fs::create_dir_all(&will_appear).unwrap();
+        assert!(
+            a.cwd_missing(0, 0),
+            "still cached as missing even though it now exists"
+        );
+    }
+
+    #[test]
+    fn foreign_session_with_untranslatable_cwd_is_not_marked_missing() {
+        // A source whose env has no path-translation mapping from the host (unlike Windows <->
+        // WSL, which do translate) means `host_cwd` returns None even though the session has a
+        // recorded cwd; that's "unknown", not "missing", so it must not be flagged.
+        use crate::env::Env;
+        use crate::providers::fake::FakeProvider;
+        let mut p = FakeProvider::default();
+        p.add_source_in("mac", "/s", Env::MacOs, "/Users/me");
+        p.add_session("/s", "a", "T", 1, 1, &[]);
+        let a = App::new(Arc::new(crate::catalog::build_fake(p)), "");
+        assert_eq!(a.catalog.host_cwd(0, 0), None);
+        assert!(a.catalog.sessions[0].meta.cwd.is_some());
+        let mut a = a;
+        assert!(!a.cwd_missing(0, 0));
     }
 
     #[test]

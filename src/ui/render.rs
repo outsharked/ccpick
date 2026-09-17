@@ -145,16 +145,17 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
     );
 }
 
-fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64) {
-    let catalog = &app.catalog;
-    let items: Vec<ListItem> = app
-        .rows
+fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64) {
+    let catalog = app.catalog.clone();
+    let rows = app.rows.clone();
+    let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
             Row::Divider => ListItem::new(Line::from("── in conversation text ──").dim()),
             Row::Session { idx, snippet } => {
-                let s = &catalog.sessions[*idx];
-                let source_idx = app.launch_source(*idx);
+                let idx = *idx;
+                let s = &catalog.sessions[idx];
+                let source_idx = app.launch_source(idx);
                 let source = &catalog.sources[source_idx];
                 let marker = if s.live.is_some() { "● " } else { "  " };
                 let title = Line::from(vec![
@@ -189,11 +190,7 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64) {
                     }
                 };
                 let item = ListItem::new(vec![title, second]);
-                let cwd_missing = match catalog.host_cwd(*idx, source_idx) {
-                    Some(p) => !p.is_dir(),
-                    None => s.meta.cwd.is_none(),
-                };
-                if cwd_missing {
+                if app.cwd_missing(idx, source_idx) {
                     item.style(Style::new().add_modifier(Modifier::DIM))
                 } else {
                     item
@@ -693,6 +690,41 @@ mod tests {
         ];
         p.add_session("/s", "a", "Wrapped convo", 1000, 1000, &messages);
         crate::catalog::build_fake(p)
+    }
+
+    #[test]
+    fn list_dims_rows_whose_project_dir_is_missing() {
+        let mut app = App::new(Arc::new(fake_catalog()), "");
+        let buffer = draw_to(&mut app, 100, 30);
+        // Session "d" ("Old notes") has cwd /nonexistent/ccpick-test; session "a" has /tmp.
+        assert!(
+            buffer[find(&buffer, "Old notes")]
+                .modifier
+                .contains(Modifier::DIM)
+        );
+        assert!(
+            !buffer[find(&buffer, "Docker build cache")]
+                .modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
+    #[test]
+    fn list_does_not_dim_a_session_whose_cwd_has_no_translation_mapping() {
+        // A source in an environment the host can't translate to/from (unlike Windows <-> WSL)
+        // means the cwd's existence is simply unknown, not missing, so it must not be dimmed.
+        use crate::env::Env;
+        use crate::providers::fake::FakeProvider;
+        let mut p = FakeProvider::default();
+        p.add_source_in("mac", "/s", Env::MacOs, "/Users/me");
+        p.add_session("/s", "a", "Untranslatable cwd", 1, 1, &[]);
+        let mut app = App::new(Arc::new(crate::catalog::build_fake(p)), "");
+        let buffer = draw_to(&mut app, 100, 30);
+        assert!(
+            !buffer[find(&buffer, "Untranslatable cwd")]
+                .modifier
+                .contains(Modifier::DIM)
+        );
     }
 
     #[test]

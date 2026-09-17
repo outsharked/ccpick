@@ -84,10 +84,9 @@ impl Catalog {
             }
         }
 
+        // The Windows `tasklist.exe` snapshot (WSL hosts) is taken lazily inside the probe, only
+        // once a Windows-domain record is actually checked, filtered by that call's process name.
         let probe = crate::process::ProcessProbe::new(settings.host.env.clone());
-        if sources.iter().any(|s| s.env == crate::env::Env::Windows) {
-            probe.prewarm_windows();
-        }
 
         // 1. Scan every store (cache hits + parallel scan of misses), remembering the store.
         let mut found: Vec<(usize, SessionMeta)> = Vec::new();

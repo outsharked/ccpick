@@ -33,6 +33,13 @@ struct CcsConfig {
     accounts: serde_yaml::Mapping,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CcsAccountEntry {
+    context_mode: Option<String>,
+    context_group: Option<String>,
+}
+
 struct Candidate {
     source: Source,
     /// Explicitly requested: warn if it doesn't exist.
@@ -100,6 +107,28 @@ fn ccs_accounts(home: &Path) -> Result<Vec<String>, String> {
         names.insert(0, n);
     }
     Ok(names)
+}
+
+/// The `shared/context-groups/<group>/projects` store for a ccs account whose config marks it
+/// `context_mode: shared`. Used as a fallback by `ClaudeProvider::store_for` when an account's
+/// own `instances/<account>/projects` symlink can't be followed directly (e.g. a WSL-native
+/// symlink accessed from a Windows host, where the raw link target isn't readable at all).
+/// `None` for an isolated account, an account not in the config, or unreadable/invalid config.
+pub(crate) fn ccs_shared_store(ccs_root: &Path, account: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(ccs_root.join("config.yaml")).ok()?;
+    let cfg: CcsConfig = serde_yaml::from_str(&text).ok()?;
+    let entry: CcsAccountEntry = serde_yaml::from_value(cfg.accounts.get(account)?.clone()).ok()?;
+    if entry.context_mode.as_deref() != Some("shared") {
+        return None;
+    }
+    let group = entry.context_group.as_deref().unwrap_or("default");
+    Some(
+        ccs_root
+            .join("shared")
+            .join("context-groups")
+            .join(group)
+            .join("projects"),
+    )
 }
 
 pub fn discover(settings: &Settings, home: &Home) -> anyhow::Result<Discovery> {

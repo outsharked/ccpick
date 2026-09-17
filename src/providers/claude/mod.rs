@@ -45,6 +45,27 @@ pub fn launch_plan(source: &Source, session: &SessionMeta) -> LaunchPlan {
     }
 }
 
+/// Falls back to this when `dunce::canonicalize` can't resolve a ccs account's own
+/// `instances/<account>/projects` symlink — e.g. a WSL-native symlink accessed from a Windows
+/// host, where the WSL 9P redirector transparently serves reads/listings through it but doesn't
+/// expose the raw link target to any Windows reparse-point API (confirmed with `fsutil
+/// reparsepoint query` itself failing the same way, not just `std::fs::read_link`). Rather than
+/// try to read the symlink, ask ccs's own config: an account with `context_mode: shared` keeps
+/// its projects in the shared context-group directory next to `instances/`.
+fn ccs_shared_store_fallback(config_dir: &Path) -> Option<PathBuf> {
+    let instances = config_dir.parent()?;
+    if instances.file_name()?.to_str()? != "instances" {
+        return None;
+    }
+    let ccs_root = instances.parent()?;
+    let account = config_dir.file_name()?.to_str()?;
+    let shared = sources::ccs_shared_store(ccs_root, account)?;
+    if !shared.is_dir() {
+        return None;
+    }
+    Some(dunce::canonicalize(&shared).unwrap_or(shared))
+}
+
 fn is_simple_needle(needle: &str) -> bool {
     !needle.is_empty()
         && needle
@@ -67,9 +88,11 @@ impl Provider for ClaudeProvider {
         &[".claude", ".ccs"]
     }
     fn store_for(&self, source: &Source) -> Option<PathBuf> {
-        dunce::canonicalize(source.config_dir.join("projects"))
-            .ok()
-            .filter(|p| p.is_dir())
+        let projects = source.config_dir.join("projects");
+        if let Some(p) = dunce::canonicalize(&projects).ok().filter(|p| p.is_dir()) {
+            return Some(p);
+        }
+        ccs_shared_store_fallback(&source.config_dir)
     }
     fn list_session_files(&self, store: &Path) -> Vec<PathBuf> {
         list_jsonl(store)
@@ -135,6 +158,77 @@ mod tests {
         assert_eq!(a, p.store_for(&src("b")).unwrap());
         assert_eq!(a, dunce::canonicalize(&shared).unwrap());
         assert!(p.store_for(&src("missing")).is_none());
+    }
+
+    fn ccs_account_source(config_dir: PathBuf) -> Source {
+        Source {
+            agent: "claude".into(),
+            name: "n".into(),
+            config_dir,
+            env: crate::env::Env::Linux,
+            env_config_dir: PathBuf::new(),
+            env_home: PathBuf::new(),
+            launch: LaunchSpec::default(),
+        }
+    }
+
+    #[test]
+    fn shared_ccs_account_falls_back_to_context_group_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ccs = tmp.path().join(".ccs");
+        // No `projects` entry under instances/c1 at all — simulates a symlink that can't be
+        // followed (e.g. a WSL-native symlink accessed from Windows), not just a missing one.
+        fs::create_dir_all(ccs.join("instances/c1")).unwrap();
+        let shared = ccs.join("shared/context-groups/default/projects");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(
+            ccs.join("config.yaml"),
+            "accounts:\n  c1:\n    context_mode: shared\n    context_group: default\n",
+        )
+        .unwrap();
+        let src = ccs_account_source(ccs.join("instances/c1"));
+        assert_eq!(
+            ClaudeProvider.store_for(&src).unwrap(),
+            dunce::canonicalize(&shared).unwrap()
+        );
+    }
+
+    #[test]
+    fn isolated_ccs_account_without_projects_has_no_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ccs = tmp.path().join(".ccs");
+        fs::create_dir_all(ccs.join("instances/c3")).unwrap();
+        fs::write(
+            ccs.join("config.yaml"),
+            "accounts:\n  c3:\n    context_mode: isolated\n",
+        )
+        .unwrap();
+        let src = ccs_account_source(ccs.join("instances/c3"));
+        assert!(ClaudeProvider.store_for(&src).is_none());
+    }
+
+    #[test]
+    fn shared_ccs_account_with_missing_group_dir_has_no_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ccs = tmp.path().join(".ccs");
+        fs::create_dir_all(ccs.join("instances/c1")).unwrap();
+        fs::write(
+            ccs.join("config.yaml"),
+            "accounts:\n  c1:\n    context_mode: shared\n    context_group: missing\n",
+        )
+        .unwrap();
+        // shared/context-groups/missing/projects deliberately not created.
+        let src = ccs_account_source(ccs.join("instances/c1"));
+        assert!(ClaudeProvider.store_for(&src).is_none());
+    }
+
+    #[test]
+    fn non_ccs_source_without_projects_has_no_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("some-config-dir");
+        fs::create_dir_all(&dir).unwrap();
+        let src = ccs_account_source(dir);
+        assert!(ClaudeProvider.store_for(&src).is_none());
     }
 
     #[test]

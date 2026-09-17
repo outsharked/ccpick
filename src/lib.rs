@@ -6,6 +6,7 @@ pub mod format;
 pub mod homes;
 pub mod launch;
 pub mod model;
+pub mod process;
 pub mod providers;
 pub mod report;
 pub mod search;

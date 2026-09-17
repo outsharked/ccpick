@@ -93,8 +93,12 @@ impl Provider for ClaudeProvider {
             Err(_) => false,
         }
     }
-    fn launch_records(&self, source: &Source) -> Vec<LaunchRecord> {
-        live::launch_records(&source.config_dir)
+    fn launch_records(
+        &self,
+        source: &Source,
+        probe: &crate::process::ProcessProbe,
+    ) -> Vec<LaunchRecord> {
+        live::launch_records(&source.config_dir, &source.env, probe)
     }
     fn launch_plan(&self, source: &Source, session: &SessionMeta) -> LaunchPlan {
         launch_plan(source, session)

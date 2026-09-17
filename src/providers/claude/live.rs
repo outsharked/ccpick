@@ -1,29 +1,24 @@
 //! Claude's per-process session registry: <config_dir>/sessions/<pid>.json.
+use crate::env::Env;
 use crate::model::LaunchRecord;
+use crate::process::{PidDomain, ProcessProbe};
 use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Deserialize)]
 struct Record {
-    pid: i32,
+    pid: i64,
     #[serde(rename = "sessionId")]
     session_id: String,
     #[serde(rename = "startedAt", default)]
     started_at: i64,
+    #[serde(rename = "pidDomain", default)]
+    pid_domain: Option<String>,
 }
 
-/// True if `pid` is a running process whose command line mentions claude
-/// (guards against a stale record whose pid was reused).
-pub fn is_claude_process(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    std::fs::read(format!("/proc/{pid}/cmdline"))
-        .map(|bytes| bytes.windows(6).any(|w| w == b"claude"))
-        .unwrap_or(false)
-}
-
-pub fn launch_records(config_dir: &Path) -> Vec<LaunchRecord> {
+/// Records from `<config_dir>/sessions/*.json`, with liveness from `probe`. A record without
+/// `pidDomain` belongs to the source's environment.
+pub fn launch_records(config_dir: &Path, env: &Env, probe: &ProcessProbe) -> Vec<LaunchRecord> {
     let Ok(entries) = std::fs::read_dir(config_dir.join("sessions")) else {
         return vec![];
     };
@@ -33,11 +28,22 @@ pub fn launch_records(config_dir: &Path) -> Vec<LaunchRecord> {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| std::fs::read(p).ok())
         .filter_map(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-        .map(|r| LaunchRecord {
-            pid: r.pid,
-            alive: is_claude_process(r.pid),
-            session_id: r.session_id,
-            started_at_ms: r.started_at,
+        .map(|r| {
+            let domain = r
+                .pid_domain
+                .as_deref()
+                .and_then(PidDomain::parse)
+                .or_else(|| PidDomain::of(env));
+            let alive = match (domain, u32::try_from(r.pid)) {
+                (Some(domain), Ok(pid)) => probe.is_running(domain, pid, "claude"),
+                _ => false,
+            };
+            LaunchRecord {
+                pid: r.pid as i32,
+                alive,
+                session_id: r.session_id,
+                started_at_ms: r.started_at,
+            }
         })
         .collect();
     records.sort_by_key(|r| r.started_at_ms);
@@ -47,8 +53,14 @@ pub fn launch_records(config_dir: &Path) -> Vec<LaunchRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::Env;
+    use crate::process::ProcessProbe;
     use std::fs;
     use std::process::Command;
+
+    fn records(dir: &Path) -> Vec<LaunchRecord> {
+        launch_records(dir, &Env::Linux, &ProcessProbe::new(Env::Linux))
+    }
 
     fn write_record(dir: &Path, pid: i32, session: &str, started: i64) {
         fs::create_dir_all(dir.join("sessions")).unwrap();
@@ -62,7 +74,7 @@ mod tests {
     #[test]
     fn missing_sessions_dir_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(launch_records(tmp.path()).is_empty());
+        assert!(records(tmp.path()).is_empty());
     }
 
     #[test]
@@ -72,7 +84,7 @@ mod tests {
         write_record(tmp.path(), 9_999_998, "early", 100);
         fs::write(tmp.path().join("sessions/junk.json"), "{nope").unwrap();
         fs::write(tmp.path().join("sessions/other.key"), "x").unwrap();
-        let recs = launch_records(tmp.path());
+        let recs = records(tmp.path());
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].session_id, "early");
         assert!(recs.iter().all(|r| !r.alive));
@@ -88,7 +100,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let pid = child.id() as i32;
         write_record(tmp.path(), pid, "live", 1);
-        let recs = launch_records(tmp.path());
+        let recs = records(tmp.path());
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(recs[0].alive);
@@ -97,10 +109,37 @@ mod tests {
     #[test]
     fn non_claude_process_is_not_alive() {
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        let alive = is_claude_process(child.id() as i32);
+        let pid = child.id();
+        let alive = ProcessProbe::new(Env::Linux).is_running(PidDomain::Linux, pid, "claude");
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!alive);
-        assert!(!is_claude_process(0));
+        assert!(!ProcessProbe::new(Env::Linux).is_running(PidDomain::Linux, 0, "claude"));
+    }
+
+    #[test]
+    fn windows_pid_domain_is_checked_against_windows_processes() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+        fs::write(
+            tmp.path().join("sessions/58892.json"),
+            r#"{"pid":58892,"sessionId":"s","startedAt":1,"pidDomain":"win32:host"}"#,
+        )
+        .unwrap();
+        let wsl = Env::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        let probe = ProcessProbe::with_windows_snapshot(
+            wsl.clone(),
+            Ok(std::collections::HashMap::from([(
+                58892,
+                "claude.exe".to_string(),
+            )])),
+        );
+        assert!(launch_records(tmp.path(), &Env::Windows, &probe)[0].alive);
+        // Same record, but the host can't see Windows processes.
+        assert!(
+            !launch_records(tmp.path(), &Env::Windows, &ProcessProbe::new(Env::Linux))[0].alive
+        );
     }
 }

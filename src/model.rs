@@ -102,6 +102,10 @@ pub trait Provider: Send + Sync {
     fn may_contain(&self, _path: &Path, _needle_lower: &str) -> bool {
         true
     }
-    fn launch_records(&self, source: &Source) -> Vec<LaunchRecord>;
+    fn launch_records(
+        &self,
+        source: &Source,
+        probe: &crate::process::ProcessProbe,
+    ) -> Vec<LaunchRecord>;
     fn launch_plan(&self, source: &Source, session: &SessionMeta) -> LaunchPlan;
 }

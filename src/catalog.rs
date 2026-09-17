@@ -84,25 +84,14 @@ impl Catalog {
             }
         }
 
-        // (provider, session id) → all (started_at, source) launches; and → live (pid, source).
-        let mut launches: HashMap<(usize, String), Vec<(i64, usize)>> = HashMap::new();
-        let mut live: HashMap<(usize, String), (i32, usize)> = HashMap::new();
-        for (si, source) in sources.iter().enumerate() {
-            let pi = source_provider[si];
-            for record in providers[pi].launch_records(source) {
-                let k = (pi, record.session_id.clone());
-                if record.alive {
-                    live.insert(k.clone(), (record.pid, si));
-                }
-                launches
-                    .entry(k)
-                    .or_default()
-                    .push((record.started_at_ms, si));
-            }
+        let probe = crate::process::ProcessProbe::new(settings.host.env.clone());
+        if sources.iter().any(|s| s.env == crate::env::Env::Windows) {
+            probe.prewarm_windows();
         }
 
-        let mut sessions = Vec::new();
-        for store in &stores {
+        // 1. Scan every store (cache hits + parallel scan of misses), remembering the store.
+        let mut found: Vec<(usize, SessionMeta)> = Vec::new();
+        for (store_idx, store) in stores.iter().enumerate() {
             let provider = &providers[store.provider];
             let agent = provider.id();
             let mut metas = Vec::new();
@@ -124,28 +113,50 @@ impl Catalog {
                 }
                 metas.push(meta);
             }
-            for meta in metas {
-                let k = (store.provider, meta.id.clone());
-                // Newest launch through a source that can see this store; else the first such source.
-                let default_source = launches
-                    .get(&k)
-                    .and_then(|l| {
-                        l.iter()
-                            .filter(|(_, si)| store.sources.contains(si))
-                            .max_by_key(|(ts, _)| *ts)
-                    })
-                    .map(|(_, si)| *si)
-                    .unwrap_or(store.sources[0]);
-                sessions.push(Session {
-                    live: live.get(&k).copied(),
-                    meta,
-                    provider: store.provider,
-                    sources: store.sources.clone(),
-                    default_source,
-                });
+            found.extend(metas.into_iter().map(|meta| (store_idx, meta)));
+        }
+
+        // 2. Launch records, with liveness from the probe.
+        let mut launches: HashMap<(usize, String), Vec<(i64, usize)>> = HashMap::new();
+        let mut live: HashMap<(usize, String), (i32, usize)> = HashMap::new();
+        for (si, source) in sources.iter().enumerate() {
+            let pi = source_provider[si];
+            for record in providers[pi].launch_records(source, &probe) {
+                let k = (pi, record.session_id.clone());
+                if record.alive {
+                    live.insert(k.clone(), (record.pid, si));
+                }
+                launches
+                    .entry(k)
+                    .or_default()
+                    .push((record.started_at_ms, si));
             }
         }
+
+        // 3. Assemble sessions.
+        let mut sessions = Vec::new();
+        for (store_idx, meta) in found {
+            let store = &stores[store_idx];
+            let k = (store.provider, meta.id.clone());
+            let default_source = launches
+                .get(&k)
+                .and_then(|l| {
+                    l.iter()
+                        .filter(|(_, si)| store.sources.contains(si))
+                        .max_by_key(|(ts, _)| *ts)
+                })
+                .map(|(_, si)| *si)
+                .unwrap_or(store.sources[0]);
+            sessions.push(Session {
+                live: live.get(&k).copied(),
+                meta,
+                provider: store.provider,
+                sources: store.sources.clone(),
+                default_source,
+            });
+        }
         sessions.sort_by_key(|s| std::cmp::Reverse(s.meta.last_ts));
+        warnings.extend(probe.warnings());
 
         Ok(Catalog {
             host: settings.host.clone(),

@@ -119,7 +119,11 @@ impl Provider for FakeProvider {
             .map(|f| f.1.clone())
             .unwrap_or_default()
     }
-    fn launch_records(&self, source: &Source) -> Vec<LaunchRecord> {
+    fn launch_records(
+        &self,
+        source: &Source,
+        _probe: &crate::process::ProcessProbe,
+    ) -> Vec<LaunchRecord> {
         self.records.get(&source.name).cloned().unwrap_or_default()
     }
     fn launch_plan(&self, source: &Source, session: &SessionMeta) -> LaunchPlan {

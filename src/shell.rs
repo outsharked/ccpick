@@ -17,8 +17,12 @@ fn is_plain(s: &str, extra: &str) -> bool {
 }
 
 /// Single-quotes unless the string only has characters no POSIX shell treats specially.
+///
+/// `=` is excluded even though POSIX itself doesn't treat it specially, because zsh's "magic
+/// equals" expansion rewrites a leading-`=` word as the path to that command on `$PATH` when
+/// pasted at an interactive prompt.
 pub fn posix_quote(s: &str) -> String {
-    if is_plain(s, "_./:=@%+-") {
+    if is_plain(s, "_./:@%+-") {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', r"'\''"))
@@ -113,6 +117,8 @@ mod tests {
         assert_eq!(posix_quote("has space"), "'has space'");
         assert_eq!(posix_quote("it's"), r"'it'\''s'");
         assert_eq!(posix_quote(""), "''");
+        assert_eq!(posix_quote("=cat"), "'=cat'");
+        assert_eq!(posix_quote("a=b"), "'a=b'");
     }
 
     #[test]
@@ -157,6 +163,18 @@ mod tests {
                 &Env::MacOs
             ),
             "CLAUDE_CONFIG_DIR='/home/me/.claude work' claude --resume abc"
+        );
+        assert_eq!(
+            resume_command(
+                &plan(
+                    "/p",
+                    &["claude", "--resume", "abc"],
+                    &[("CLAUDE_CONFIG_DIR", "/x")],
+                    &["OTHER"]
+                ),
+                &Env::Linux
+            ),
+            "cd '/p' && env -u OTHER CLAUDE_CONFIG_DIR='/x' claude --resume abc"
         );
     }
 

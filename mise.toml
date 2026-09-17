@@ -1,0 +1,34 @@
+[tools]
+rust = "stable"
+
+[tasks.dev]
+description = "Run ccpick from source (args pass through: mise dev -- --list docker)"
+run = "cargo run --"
+
+[tasks.test]
+description = "Run the test suite"
+run = "cargo test"
+
+[tasks.lint]
+description = "clippy with warnings as errors"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.format]
+description = "Format the code"
+run = "cargo fmt"
+
+[tasks."format:check"]
+description = "Check formatting without changing files"
+run = "cargo fmt --check"
+
+[tasks.check]
+description = "Everything CI would check: fmt, clippy, tests"
+depends = ["format:check", "lint", "test"]
+
+[tasks.build]
+description = "Release build"
+run = "cargo build --release"
+
+[tasks.install-bin]
+description = "Install the release binary to ~/.cargo/bin"
+run = "cargo install --path ."

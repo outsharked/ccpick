@@ -30,9 +30,10 @@ conversation text appear below a divider shortly after.
 | `Ctrl-A` | Cycle which source/account resumes the session |
 | `Ctrl-R` | Running sessions only |
 | `Ctrl-S` | Sort by last activity / created |
-| `Tab` | Focus preview (arrows scroll messages) |
-| `↑` / `↓` | Move selection (list) or scroll one message (preview) |
-| `PgUp` / `PgDn` | Move/scroll 10 at a time |
+| `→` / `←` | Focus the conversation preview / the session list (`Tab` toggles) |
+| `↑` / `↓` | Move selection (list) or scroll one line (preview) |
+| `PgUp` / `PgDn` | Move 10 sessions (list) or scroll a page (preview) |
+| `Home` / `End` | First/last session (list) or top/bottom of the conversation (preview) |
 | `Esc` / `Ctrl-C` | Quit |
 
 ## Sources
@@ -64,6 +65,22 @@ config_dir = "~/.claude-work"
 ```
 
 Metadata is cached in `~/.cache/ccpick/meta.json` (`--no-cache` to bypass).
+
+## Development
+
+Tasks are managed with [mise](https://mise.jdx.dev) (`mise tasks` lists them):
+
+```bash
+mise dev                      # run the TUI from source
+mise dev -- --list docker     # args after -- pass through to ccpick
+mise check                    # fmt check, clippy (warnings as errors), tests
+mise test                     # tests only
+mise format                   # format
+mise install-bin              # install the release binary to ~/.cargo/bin
+```
+
+Run the TUI from a plain shell rather than inside a Claude Code session, since resuming
+a session replaces the ccpick process.
 
 ## Design
 

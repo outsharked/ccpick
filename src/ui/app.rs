@@ -6,6 +6,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Rows moved by PgUp/PgDn in the session list.
+const LIST_PAGE: isize = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     List,
@@ -32,6 +35,23 @@ pub enum Action {
     Search(String),
 }
 
+/// Preview geometry reported by the renderer each frame, used to clamp scrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewMetrics {
+    /// Total rendered rows of the conversation at the current width.
+    pub total: usize,
+    /// Rows visible in the message area.
+    pub page: usize,
+    /// Row the view shows when the user hasn't scrolled (end, or a search hit).
+    pub anchor: usize,
+}
+
+impl PreviewMetrics {
+    pub fn max_scroll(&self) -> usize {
+        self.total.saturating_sub(self.page)
+    }
+}
+
 pub struct App {
     pub catalog: Arc<Catalog>,
     pub query: String,
@@ -40,8 +60,12 @@ pub struct App {
     pub focus: Focus,
     pub sort: SortMode,
     pub running_only: bool,
-    /// Preview scroll in messages, relative to the default anchor.
-    pub preview_offset: isize,
+    /// Top row of the preview; None follows the anchor (end of conversation or search hit).
+    pub preview_scroll: Option<usize>,
+    /// Set by the renderer on every draw.
+    pub preview_metrics: Option<PreviewMetrics>,
+    /// Renderer's measured layout for the previewed session.
+    pub(crate) preview_layout: Option<super::render::PreviewLayout>,
     pub status: Option<String>,
     source_override: HashMap<usize, usize>,
     text_hits: Vec<TextHit>,
@@ -59,7 +83,9 @@ impl App {
             focus: Focus::List,
             sort: SortMode::LastActivity,
             running_only: false,
-            preview_offset: 0,
+            preview_scroll: None,
+            preview_metrics: None,
+            preview_layout: None,
             status: None,
             source_override: HashMap::new(),
             text_hits: Vec::new(),
@@ -104,6 +130,13 @@ impl App {
         }
         self.text_hits = hits;
         self.recompute_rows(true);
+    }
+
+    /// The preview's top row for the given geometry.
+    pub fn preview_position(&self, metrics: PreviewMetrics) -> usize {
+        self.preview_scroll
+            .unwrap_or(metrics.anchor)
+            .min(metrics.max_scroll())
     }
 
     pub fn preview_messages(&mut self) -> &[Message] {
@@ -191,30 +224,50 @@ impl App {
         }
         if next as usize != self.selected {
             self.selected = next as usize;
-            self.preview_offset = 0;
+            self.preview_scroll = None;
             self.status = None;
         }
     }
 
-    fn scroll_or_move(&mut self, delta: isize) {
+    fn scroll_preview(&mut self, delta: isize) {
+        let Some(metrics) = self.preview_metrics else {
+            return;
+        };
+        let pos = self.preview_position(metrics) as isize;
+        let max = metrics.max_scroll() as isize;
+        self.preview_scroll = Some((pos + delta).clamp(0, max) as usize);
+    }
+
+    /// Up/Down/PgUp/PgDn: move the list selection or scroll the preview. `rows` is a count of
+    /// lines, or of pages when `pages` is true.
+    fn scroll_or_move(&mut self, rows: isize, pages: bool) {
         match self.focus {
-            Focus::List => self.move_selection(delta),
+            Focus::List => self.move_selection(if pages { rows * LIST_PAGE } else { rows }),
             Focus::Preview => {
-                // Bound how far the offset can drift from the default anchor:
-                // a window start can never fall outside the message list, so
-                // an offset magnitude beyond `len - 1` can never do anything
-                // (render.rs clamps the resulting start to [0, last]) but
-                // would otherwise accumulate unboundedly and require many
-                // opposite presses to undo.
-                let bound = self.preview_messages().len().saturating_sub(1) as isize;
-                self.preview_offset = (self.preview_offset + delta).clamp(-bound, bound);
+                let page = self.preview_metrics.map_or(1, |m| m.page.max(1)) as isize;
+                self.scroll_preview(if pages { rows * page } else { rows });
+            }
+        }
+    }
+
+    /// Home/End: jump to the first/last list row or the top/bottom of the preview.
+    fn jump(&mut self, to_end: bool) {
+        match self.focus {
+            Focus::List => {
+                let len = self.rows.len() as isize;
+                self.move_selection(if to_end { len } else { -len });
+            }
+            Focus::Preview => {
+                if let Some(metrics) = self.preview_metrics {
+                    self.preview_scroll = Some(if to_end { metrics.max_scroll() } else { 0 });
+                }
             }
         }
     }
 
     fn query_changed(&mut self) -> Action {
         self.text_hits.clear();
-        self.preview_offset = 0;
+        self.preview_scroll = None;
         self.status = None;
         self.recompute_rows(false);
         Action::Search(self.query.clone())
@@ -292,20 +345,36 @@ impl App {
                 self.recompute_rows(true);
                 Action::None
             }
+            (KeyCode::Right, _) => {
+                self.focus = Focus::Preview;
+                Action::None
+            }
+            (KeyCode::Left, _) => {
+                self.focus = Focus::List;
+                Action::None
+            }
             (KeyCode::Up, _) => {
-                self.scroll_or_move(-1);
+                self.scroll_or_move(-1, false);
                 Action::None
             }
             (KeyCode::Down, _) => {
-                self.scroll_or_move(1);
+                self.scroll_or_move(1, false);
                 Action::None
             }
             (KeyCode::PageUp, _) => {
-                self.scroll_or_move(-10);
+                self.scroll_or_move(-1, true);
                 Action::None
             }
             (KeyCode::PageDown, _) => {
-                self.scroll_or_move(10);
+                self.scroll_or_move(1, true);
+                Action::None
+            }
+            (KeyCode::Home, _) => {
+                self.jump(false);
+                Action::None
+            }
+            (KeyCode::End, _) => {
+                self.jump(true);
                 Action::None
             }
             (KeyCode::Backspace, _) => {
@@ -465,26 +534,89 @@ mod tests {
         assert_eq!(a.focus, Focus::Preview);
         a.handle_key(key(KeyCode::Up));
         assert_eq!(a.selected, 0);
-        assert_eq!(a.preview_offset, -1);
         assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::Quit);
         assert_eq!(a.handle_key(ctrl('c')), Action::Quit);
     }
 
     #[test]
-    fn preview_offset_is_clamped_to_message_count() {
+    fn arrows_switch_panes() {
         let mut a = app("");
-        a.handle_key(key(KeyCode::Tab));
-        // Session "a" (selected by default) has 2 messages, so the offset
-        // range that can ever produce a valid window start is [-1, 1].
-        assert_eq!(a.preview_messages().len(), 2);
-        for _ in 0..10 {
-            a.handle_key(key(KeyCode::Up));
-        }
-        assert_eq!(a.preview_offset, -1);
-        for _ in 0..20 {
-            a.handle_key(key(KeyCode::Down));
-        }
-        assert_eq!(a.preview_offset, 1);
+        a.handle_key(key(KeyCode::Right));
+        assert_eq!(a.focus, Focus::Preview);
+        a.handle_key(key(KeyCode::Right));
+        assert_eq!(a.focus, Focus::Preview);
+        a.handle_key(key(KeyCode::Left));
+        assert_eq!(a.focus, Focus::List);
+        a.handle_key(key(KeyCode::Left));
+        assert_eq!(a.focus, Focus::List);
+    }
+
+    #[test]
+    fn preview_scrolls_by_line_page_and_ends() {
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Right));
+        a.preview_metrics = Some(PreviewMetrics {
+            total: 100,
+            page: 10,
+            anchor: 90,
+        });
+        a.handle_key(key(KeyCode::Up));
+        assert_eq!(a.preview_scroll, Some(89));
+        a.handle_key(key(KeyCode::PageUp));
+        assert_eq!(a.preview_scroll, Some(79));
+        a.handle_key(key(KeyCode::Home));
+        assert_eq!(a.preview_scroll, Some(0));
+        a.handle_key(key(KeyCode::Up));
+        assert_eq!(a.preview_scroll, Some(0));
+        a.handle_key(key(KeyCode::End));
+        assert_eq!(a.preview_scroll, Some(90));
+        a.handle_key(key(KeyCode::PageDown));
+        assert_eq!(a.preview_scroll, Some(90));
+        // Selection in the list is untouched while the preview has focus.
+        assert_eq!(a.selected, 0);
+    }
+
+    #[test]
+    fn preview_scroll_without_metrics_is_a_no_op() {
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Right));
+        a.handle_key(key(KeyCode::Down));
+        assert_eq!(a.preview_scroll, None);
+    }
+
+    #[test]
+    fn preview_position_follows_anchor_until_scrolled_and_clamps() {
+        let mut a = app("");
+        let m = PreviewMetrics {
+            total: 50,
+            page: 20,
+            anchor: 30,
+        };
+        assert_eq!(a.preview_position(m), 30);
+        a.preview_scroll = Some(45);
+        assert_eq!(a.preview_position(m), 30);
+        a.preview_scroll = Some(3);
+        assert_eq!(a.preview_position(m), 3);
+    }
+
+    #[test]
+    fn changing_selection_or_query_resets_preview_scroll() {
+        let mut a = app("");
+        a.preview_scroll = Some(5);
+        a.handle_key(key(KeyCode::Down));
+        assert_eq!(a.preview_scroll, None);
+        a.preview_scroll = Some(5);
+        a.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(a.preview_scroll, None);
+    }
+
+    #[test]
+    fn home_and_end_move_list_selection() {
+        let mut a = app("");
+        a.handle_key(key(KeyCode::End));
+        assert_eq!(a.selected, 3);
+        a.handle_key(key(KeyCode::Home));
+        assert_eq!(a.selected, 0);
     }
 
     #[test]

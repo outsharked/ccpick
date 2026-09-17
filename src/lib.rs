@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod catalog;
+pub mod clipboard;
 pub mod config;
 pub mod env;
 pub mod format;
@@ -10,4 +11,5 @@ pub mod process;
 pub mod providers;
 pub mod report;
 pub mod search;
+pub mod shell;
 pub mod ui;

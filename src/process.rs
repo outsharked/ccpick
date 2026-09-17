@@ -41,6 +41,8 @@ pub struct ProcessProbe {
     host: Env,
     pending: Mutex<Option<JoinHandle<Snapshot>>>,
     snapshot: OnceLock<Snapshot>,
+    /// How to take the Windows snapshot; swappable in tests.
+    snapshotter: fn() -> Snapshot,
 }
 
 impl ProcessProbe {
@@ -49,6 +51,7 @@ impl ProcessProbe {
             host,
             pending: Mutex::new(None),
             snapshot: OnceLock::new(),
+            snapshotter: take_tasklist_snapshot,
         }
     }
 
@@ -59,14 +62,33 @@ impl ProcessProbe {
         probe
     }
 
+    /// A probe whose Windows snapshot is taken by `snapshotter` (sync fallback or on the
+    /// background thread started by `prewarm_windows`), for testing the real spawn/join and
+    /// panic-recovery paths without shelling out to `tasklist.exe`.
+    #[cfg(test)]
+    pub fn with_windows_snapshotter(host: Env, snapshotter: fn() -> Snapshot) -> ProcessProbe {
+        ProcessProbe {
+            host,
+            pending: Mutex::new(None),
+            snapshot: OnceLock::new(),
+            snapshotter,
+        }
+    }
+
     /// Starts the Windows process snapshot in the background. No-op except on WSL hosts.
     pub fn prewarm_windows(&self) {
-        if !matches!(self.host, Env::Wsl { .. }) || self.snapshot.get().is_some() {
+        if !matches!(self.host, Env::Wsl { .. }) {
             return;
         }
         let mut pending = self.pending.lock().expect("probe lock");
+        // Re-check under the lock: `windows_snapshot` takes `pending` and may complete the
+        // snapshot synchronously between our (lock-free) caller's decision to prewarm and here.
+        if self.snapshot.get().is_some() {
+            return;
+        }
         if pending.is_none() {
-            *pending = Some(std::thread::spawn(take_tasklist_snapshot));
+            let snapshotter = self.snapshotter;
+            *pending = Some(std::thread::spawn(snapshotter));
         }
     }
 
@@ -77,7 +99,7 @@ impl ProcessProbe {
                 Some(h) => h
                     .join()
                     .unwrap_or_else(|_| Err("tasklist.exe snapshot thread panicked".into())),
-                None => take_tasklist_snapshot(),
+                None => (self.snapshotter)(),
             }
         })
     }
@@ -115,6 +137,9 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 }
 
 fn linux_cmdline_contains(pid: u32, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| bytes.windows(name.len()).any(|w| w == name.as_bytes()))
         .unwrap_or(false)
@@ -193,6 +218,7 @@ fn split_csv_line(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn ubuntu() -> Env {
         Env::Wsl {
@@ -262,5 +288,55 @@ mod tests {
         let probe = ProcessProbe::new(Env::Linux);
         assert!(probe.is_running(PidDomain::Linux, std::process::id(), "ccpick"));
         assert!(!probe.is_running(PidDomain::Linux, std::process::id(), "definitely-not-here"));
+        // An empty name must not panic `bytes.windows(0)`-style; it just never matches.
+        assert!(!probe.is_running(PidDomain::Linux, std::process::id(), ""));
+    }
+
+    static PREWARM_CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn prewarm_snapshotter() -> Snapshot {
+        PREWARM_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(HashMap::from([(58892, "claude.exe".to_string())]))
+    }
+
+    #[test]
+    fn prewarmed_background_snapshot_runs_once() {
+        let probe = ProcessProbe::with_windows_snapshotter(ubuntu(), prewarm_snapshotter);
+        probe.prewarm_windows();
+        assert!(probe.is_running(PidDomain::Windows, 58892, "claude"));
+        assert!(!probe.is_running(PidDomain::Windows, 1, "claude"));
+        assert!(probe.is_running(PidDomain::Windows, 58892, "claude"));
+        assert_eq!(PREWARM_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    static PANIC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn panicking_snapshotter() -> Snapshot {
+        PANIC_CALLS.fetch_add(1, Ordering::SeqCst);
+        panic!("simulated tasklist.exe panic");
+    }
+
+    #[test]
+    fn panicking_background_snapshot_is_reported_as_a_warning() {
+        let probe = ProcessProbe::with_windows_snapshotter(ubuntu(), panicking_snapshotter);
+        probe.prewarm_windows();
+        assert!(!probe.is_running(PidDomain::Windows, 58892, "claude"));
+        assert_eq!(
+            probe.warnings(),
+            vec!["tasklist.exe snapshot thread panicked".to_string()]
+        );
+        assert_eq!(PANIC_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    static SYNC_CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn sync_snapshotter() -> Snapshot {
+        SYNC_CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(HashMap::from([(58892, "claude.exe".to_string())]))
+    }
+
+    #[test]
+    fn without_prewarm_first_call_takes_the_snapshot_synchronously() {
+        let probe = ProcessProbe::with_windows_snapshotter(ubuntu(), sync_snapshotter);
+        assert!(probe.is_running(PidDomain::Windows, 58892, "claude"));
+        assert!(probe.is_running(PidDomain::Windows, 58892, "claude"));
+        assert_eq!(SYNC_CALLS.load(Ordering::SeqCst), 1);
     }
 }

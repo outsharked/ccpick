@@ -4,11 +4,30 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct EnvironmentsConfig {
+    /// Discover the other side of a Windows + WSL machine.
+    pub auto: bool,
+    /// Windows host only: WSL distros to scan even when not running (boots them).
+    pub wsl_distros: Vec<String>,
+}
+
+impl Default for EnvironmentsConfig {
+    fn default() -> Self {
+        EnvironmentsConfig {
+            auto: true,
+            wsl_distros: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ConfigFile {
     #[serde(rename = "source")]
     pub sources: Vec<SourceConfig>,
+    pub environments: EnvironmentsConfig,
     /// Per-agent tables such as `[claude]`, interpreted by each provider.
     #[serde(flatten)]
     pub agents: toml::Table,
@@ -21,6 +40,8 @@ pub struct SourceConfig {
     pub name: Option<String>,
     pub config_dir: String,
     pub command: Option<Vec<String>>,
+    /// `windows`, `linux`, `macos` or `wsl:<distro>`; inferred from the path when omitted.
+    pub env: Option<String>,
 }
 
 fn default_agent() -> String {
@@ -30,6 +51,7 @@ fn default_agent() -> String {
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     pub home: PathBuf,
+    pub host: crate::env::HostContext,
     pub env: HashMap<String, String>,
     pub file: ConfigFile,
     pub cli_config_dirs: Vec<PathBuf>,
@@ -86,9 +108,11 @@ pub fn load_settings(
         }
         _ => ConfigFile::default(),
     };
+    let env: HashMap<String, String> = std::env::vars().collect();
     Ok(Settings {
         home,
-        env: std::env::vars().collect(),
+        host: crate::env::HostContext::detect(&env),
+        env,
         file,
         cli_config_dirs,
     })
@@ -170,6 +194,19 @@ command = ["wrap", "--p"]
         let dir = tempfile::tempdir().unwrap();
         let s = load_settings(Some(&dir.path().join("nope.toml")), vec![]).unwrap();
         assert!(s.file.sources.is_empty());
+    }
+
+    #[test]
+    fn parses_environments_and_source_env() {
+        let cfg = parse_config(
+            "[environments]\nauto = false\nwsl_distros = [\"Ubuntu\"]\n\n[[source]]\nconfig_dir = \"/mnt/c/Users/me/.claude\"\nenv = \"windows\"\n",
+        )
+        .unwrap();
+        assert!(!cfg.environments.auto);
+        assert_eq!(cfg.environments.wsl_distros, vec!["Ubuntu".to_string()]);
+        assert_eq!(cfg.sources[0].env.as_deref(), Some("windows"));
+        assert!(!cfg.agents.contains_key("environments"));
+        assert!(parse_config("").unwrap().environments.auto);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Drawing the TUI from App state.
 use super::app::{App, Focus, PreviewMetrics, Row};
-use crate::format::{exact, friendly, shorten_home};
+use crate::format::{exact, friendly, shorten_home_in};
 use crate::model::{Message, Role};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,7 +10,6 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
-use std::path::Path;
 
 const LIST_HELP: &str = " ↵ resume  → preview  ^A source  ^R running only  ^S sort  esc quit";
 const PREVIEW_HELP: &str = " ← sessions  ↑↓ line  PgUp/PgDn page  Home/End  ↵ resume  esc quit";
@@ -41,7 +40,7 @@ pub fn highlight(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
     spans
 }
 
-pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64, home: &Path) {
+pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64) {
     let catalog = app.catalog.clone();
     let title = format!(
         " ccpick ─ {} sessions ─ {} sources ─ {} running ",
@@ -70,8 +69,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64, home: &Path) {
 
     let [list_area, preview_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
-    draw_list(frame, app, list_area, now_ms, home);
-    draw_preview(frame, app, preview_area, home);
+    draw_list(frame, app, list_area, now_ms);
+    draw_preview(frame, app, preview_area);
 
     let footer_line = match &app.status {
         Some(status) => Line::from(Span::styled(status.clone(), Style::new().fg(Color::Yellow))),
@@ -84,7 +83,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64, home: &Path) {
     frame.render_widget(Paragraph::new(footer_line), footer);
 }
 
-fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path) {
+fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64) {
     let catalog = &app.catalog;
     let items: Vec<ListItem> = app
         .rows
@@ -93,6 +92,8 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path)
             Row::Divider => ListItem::new(Line::from("── in conversation text ──").dim()),
             Row::Session { idx, snippet } => {
                 let s = &catalog.sessions[*idx];
+                let source_idx = app.launch_source(*idx);
+                let source = &catalog.sources[source_idx];
                 let marker = if s.live.is_some() { "● " } else { "  " };
                 let title = Line::from(vec![
                     Span::styled(marker, Style::new().fg(Color::Green)),
@@ -112,11 +113,11 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path)
                             .meta
                             .cwd
                             .as_deref()
-                            .map(|p| shorten_home(p, home))
+                            .map(|p| shorten_home_in(p, &source.env_home, &source.env))
                             .unwrap_or_else(|| "?".into());
                         let mut detail = format!(
                             "  {cwd} · {} · {}",
-                            catalog.sources[app.launch_source(*idx)].name,
+                            source.name,
                             friendly(now_ms, s.meta.last_ts)
                         );
                         if s.live.is_some() {
@@ -126,7 +127,10 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path)
                     }
                 };
                 let item = ListItem::new(vec![title, second]);
-                let cwd_missing = s.meta.cwd.as_deref().is_none_or(|p| !p.is_dir());
+                let cwd_missing = match catalog.host_cwd(*idx, source_idx) {
+                    Some(p) => !p.is_dir(),
+                    None => s.meta.cwd.is_none(),
+                };
                 if cwd_missing {
                     item.style(Style::new().add_modifier(Modifier::DIM))
                 } else {
@@ -165,7 +169,7 @@ fn pane_title(text: &str, focused: bool) -> Line<'static> {
     Line::from(Span::styled(format!(" {text}"), style))
 }
 
-fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, home: &Path) {
+fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Preview;
     let [title_area, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -185,7 +189,8 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, home: &Path) {
     };
     let catalog = app.catalog.clone();
     let session = &catalog.sessions[idx];
-    let source_name = catalog.sources[app.launch_source(idx)].name.clone();
+    let source = &catalog.sources[app.launch_source(idx)];
+    let source_name = source.name.clone();
 
     // Header: its real rendered height (a long cwd can wrap), full pane width minus padding.
     let header_width = body.width.saturating_sub(2).max(1);
@@ -193,7 +198,7 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, home: &Path) {
         .meta
         .cwd
         .as_deref()
-        .map(|p| shorten_home(p, home))
+        .map(|p| shorten_home_in(p, &source.env_home, &source.env))
         .unwrap_or_else(|| "?".into());
     let header_lines = vec![
         Line::from(format!(
@@ -387,9 +392,7 @@ mod tests {
 
     fn screen(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal
-            .draw(|f| draw(f, app, 10_000, Path::new("/home/x")))
-            .unwrap();
+        terminal.draw(|f| draw(f, app, 10_000)).unwrap();
         terminal
             .backend()
             .buffer()
@@ -484,10 +487,20 @@ mod tests {
 
     fn draw_to(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|f| draw(f, app, 10_000, Path::new("/home/x")))
-            .unwrap();
+        terminal.draw(|f| draw(f, app, 10_000)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn foreign_rows_shorten_against_their_own_home() {
+        let mut app = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
+        let text: String = draw_to(&mut app, 100, 30)
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains(r"~\proj"));
+        assert!(text.contains("win:c1"));
     }
 
     #[test]
@@ -586,9 +599,7 @@ mod tests {
     fn preview_keeps_newest_message_visible() {
         let mut app = App::new(Arc::new(catalog_with_long_tail()), "");
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        terminal
-            .draw(|f| draw(f, &mut app, 10_000, Path::new("/home/x")))
-            .unwrap();
+        terminal.draw(|f| draw(f, &mut app, 10_000)).unwrap();
         let text: String = terminal
             .backend()
             .buffer()
@@ -626,9 +637,7 @@ mod tests {
     fn preview_default_view_shows_end_of_wrapped_last_message() {
         let mut app = App::new(Arc::new(catalog_with_wrapped_last_message()), "");
         let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
-        terminal
-            .draw(|f| draw(f, &mut app, 10_000, Path::new("/home/x")))
-            .unwrap();
+        terminal.draw(|f| draw(f, &mut app, 10_000)).unwrap();
         let text: String = terminal
             .backend()
             .buffer()

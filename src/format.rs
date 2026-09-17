@@ -64,6 +64,30 @@ pub fn shorten_home(path: &Path, home: &Path) -> String {
     }
 }
 
+/// Like `shorten_home`, but for a path in `env`'s own form: Windows paths compare
+/// case-insensitively with `\` separators. An empty `home` leaves the path unchanged.
+pub fn shorten_home_in(path: &Path, home: &Path, env: &crate::env::Env) -> String {
+    if home.as_os_str().is_empty() {
+        return path.display().to_string();
+    }
+    if !env.is_windows() {
+        return shorten_home(path, home);
+    }
+    let p = path.to_string_lossy().replace('/', "\\");
+    let h = home.to_string_lossy().replace('/', "\\");
+    let h = h.trim_end_matches('\\');
+    if p.len() >= h.len() && p.is_char_boundary(h.len()) && p[..h.len()].eq_ignore_ascii_case(h) {
+        let rest = &p[h.len()..];
+        if rest.is_empty() {
+            return "~".into();
+        }
+        if rest.starts_with('\\') {
+            return format!("~{rest}");
+        }
+    }
+    p
+}
+
 pub fn local_time(ts_ms: Option<i64>) -> String {
     ts_ms
         .and_then(chrono::DateTime::from_timestamp_millis)
@@ -154,5 +178,31 @@ mod tests {
         assert_eq!(shorten_home(Path::new("/home/u"), home), "~");
         assert_eq!(shorten_home(Path::new("/home/u/code/x"), home), "~/code/x");
         assert_eq!(shorten_home(Path::new("/srv/x"), home), "/srv/x");
+    }
+
+    #[test]
+    fn shortens_windows_paths_case_insensitively() {
+        use crate::env::Env;
+        let home = Path::new(r"C:\Users\me");
+        assert_eq!(
+            shorten_home_in(Path::new(r"c:\users\me\code\x"), home, &Env::Windows),
+            r"~\code\x"
+        );
+        assert_eq!(
+            shorten_home_in(Path::new(r"C:\Users\me"), home, &Env::Windows),
+            "~"
+        );
+        assert_eq!(
+            shorten_home_in(Path::new(r"C:\Users\meow"), home, &Env::Windows),
+            r"C:\Users\meow"
+        );
+        assert_eq!(
+            shorten_home_in(Path::new("/home/u/x"), Path::new("/home/u"), &Env::Linux),
+            "~/x"
+        );
+        assert_eq!(
+            shorten_home_in(Path::new("/x"), Path::new(""), &Env::Linux),
+            "/x"
+        );
     }
 }

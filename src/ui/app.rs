@@ -301,10 +301,16 @@ impl App {
             ));
             return Action::None;
         }
-        match &session.meta.cwd {
-            Some(cwd) if cwd.is_dir() => {
-                Action::Launch(self.catalog.launch_plan(idx, self.launch_source(idx)))
-            }
+        let source = self.launch_source(idx);
+        if !self.catalog.is_launchable(source) {
+            self.status = Some(format!(
+                "this session lives in {} — resume it there",
+                self.catalog.sources[source].env.display_name()
+            ));
+            return Action::None;
+        }
+        match self.catalog.host_cwd(idx, source) {
+            Some(cwd) if cwd.is_dir() => Action::Launch(self.catalog.launch_plan(idx, source)),
             Some(cwd) => {
                 self.status = Some(format!("project dir no longer exists: {}", cwd.display()));
                 Action::None
@@ -508,6 +514,17 @@ mod tests {
         assert_eq!(
             a.status.as_deref(),
             Some("project dir no longer exists: /nonexistent/ccpick-test")
+        );
+    }
+
+    #[test]
+    fn enter_on_foreign_session_does_not_launch() {
+        let mut a = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
+        a.selected = 1; // session "w" (older)
+        assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
+        assert_eq!(
+            a.status.as_deref(),
+            Some("this session lives in Windows — resume it there")
         );
     }
 

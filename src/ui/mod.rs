@@ -9,7 +9,6 @@ use crate::search::SearchWorker;
 use app::{Action, App};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +17,6 @@ const TICK: Duration = Duration::from_millis(50);
 
 /// Runs the TUI. Returns the plan to exec, or None if the user quit.
 pub fn run(catalog: Arc<Catalog>, query: &str) -> anyhow::Result<Option<LaunchPlan>> {
-    let home = dirs::home_dir().unwrap_or_default();
     let worker = SearchWorker::spawn(catalog.clone(), DEBOUNCE);
     let mut app = App::new(catalog, query);
     if !query.trim().is_empty() {
@@ -29,7 +27,7 @@ pub fn run(catalog: Arc<Catalog>, query: &str) -> anyhow::Result<Option<LaunchPl
     // Unlike ratatui::init, it reports failure (e.g. stdout isn't a TTY)
     // instead of panicking; main() maps the error to exit code 2.
     let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal, &mut app, &worker, &home);
+    let result = event_loop(&mut terminal, &mut app, &worker);
     ratatui::restore();
     result
 }
@@ -38,13 +36,12 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     worker: &SearchWorker,
-    home: &Path,
 ) -> anyhow::Result<Option<LaunchPlan>> {
     loop {
         while let Ok((generation, hits)) = worker.results.try_recv() {
             app.apply_text_hits(generation, hits);
         }
-        terminal.draw(|frame| render::draw(frame, app, now_ms(), home))?;
+        terminal.draw(|frame| render::draw(frame, app, now_ms()))?;
         if !event::poll(TICK)? {
             continue;
         }

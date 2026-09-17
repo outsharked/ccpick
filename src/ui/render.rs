@@ -1,6 +1,6 @@
 //! Drawing the TUI from App state.
 use super::app::{App, Focus, PreviewMetrics, Row};
-use crate::format::{relative, shorten_home};
+use crate::format::{exact, friendly, shorten_home};
 use crate::model::{Message, Role};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -71,7 +71,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64, home: &Path) {
     let [list_area, preview_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body);
     draw_list(frame, app, list_area, now_ms, home);
-    draw_preview(frame, app, preview_area, now_ms, home);
+    draw_preview(frame, app, preview_area, home);
 
     let footer_line = match &app.status {
         Some(status) => Line::from(Span::styled(status.clone(), Style::new().fg(Color::Yellow))),
@@ -117,7 +117,7 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64, home: &Path)
                         let mut detail = format!(
                             "  {cwd} · {} · {}",
                             catalog.sources[app.launch_source(*idx)].name,
-                            relative(now_ms, s.meta.last_ts)
+                            friendly(now_ms, s.meta.last_ts)
                         );
                         if s.live.is_some() {
                             detail.push_str(" [running]");
@@ -165,7 +165,7 @@ fn pane_title(text: &str, focused: bool) -> Line<'static> {
     Line::from(Span::styled(format!(" {text}"), style))
 }
 
-fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home: &Path) {
+fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, home: &Path) {
     let focused = app.focus == Focus::Preview;
     let [title_area, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -201,12 +201,13 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64, home:
             session.meta.branch.as_deref().unwrap_or("-")
         )),
         Line::from(format!(
-            "{} msgs · last {} · {}",
+            "{} msgs · started {} · last {}",
             session.meta.msg_count,
-            relative(now_ms, session.meta.last_ts),
-            session.meta.id
+            exact(session.meta.first_ts),
+            exact(session.meta.last_ts),
         ))
         .dim(),
+        Line::from(session.meta.id.clone()).dim(),
         Line::from("─".repeat(header_width as usize)).dim(),
     ];
     let header_height = Paragraph::new(header_lines.clone())

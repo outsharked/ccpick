@@ -1,21 +1,59 @@
+use chrono::{DateTime, Datelike, Local, TimeZone};
 use std::path::Path;
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-pub fn relative(now_ms: i64, ts_ms: Option<i64>) -> String {
-    let Some(ts) = ts_ms else { return "-".into() };
-    let secs = ((now_ms - ts) / 1000).max(0);
-    const DAY: i64 = 86_400;
-    match secs {
-        s if s < 60 => "now".into(),
-        s if s < 3_600 => format!("{}m", s / 60),
-        s if s < DAY => format!("{}h", s / 3_600),
-        s if s < 30 * DAY => format!("{}d", s / DAY),
-        s if s < 365 * DAY => format!("{}mo", s / (30 * DAY)),
-        s => format!("{}y", s / (365 * DAY)),
+/// Human-friendly "when" for a list row, by local calendar day: `6:30 AM`, `Yesterday 12:00 AM`,
+/// `Last Tuesday`, `Last week`, `Earlier this month (9/2)`, `Last month (8/22)`, `7/14`,
+/// `12/22/25`.
+pub fn friendly(now_ms: i64, ts_ms: Option<i64>) -> String {
+    match (to_local(Some(now_ms)), to_local(ts_ms)) {
+        (Some(now), Some(ts)) => friendly_in(&now, &ts),
+        _ => "-".into(),
     }
+}
+
+/// Full local date and time, e.g. `Wed Sep 16, 2026 6:30 AM`.
+pub fn exact(ts_ms: Option<i64>) -> String {
+    to_local(ts_ms).map_or_else(|| "-".into(), |ts| exact_in(&ts))
+}
+
+fn to_local(ts_ms: Option<i64>) -> Option<DateTime<Local>> {
+    ts_ms
+        .and_then(DateTime::from_timestamp_millis)
+        .map(|d| d.with_timezone(&Local))
+}
+
+fn friendly_in<Tz: TimeZone>(now: &DateTime<Tz>, ts: &DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let days = (now.date_naive() - ts.date_naive()).num_days();
+    let time = ts.format("%-I:%M %p");
+    let month_index = |d: &DateTime<Tz>| d.year() * 12 + d.month0() as i32;
+    match days {
+        ..=0 => time.to_string(),
+        1 => format!("Yesterday {time}"),
+        2..=6 => format!("Last {}", ts.format("%A")),
+        7..=13 => "Last week".into(),
+        _ if month_index(now) == month_index(ts) => {
+            format!("Earlier this month ({})", ts.format("%-m/%-d"))
+        }
+        _ if month_index(now) - month_index(ts) == 1 => {
+            format!("Last month ({})", ts.format("%-m/%-d"))
+        }
+        _ if now.year() == ts.year() => ts.format("%-m/%-d").to_string(),
+        _ => ts.format("%-m/%-d/%y").to_string(),
+    }
+}
+
+fn exact_in<Tz: TimeZone>(ts: &DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    ts.format("%a %b %-d, %Y %-I:%M %p").to_string()
 }
 
 pub fn shorten_home(path: &Path, home: &Path) -> String {
@@ -41,17 +79,73 @@ pub fn local_time(ts_ms: Option<i64>) -> String {
 mod tests {
     use super::*;
 
+    use chrono::{FixedOffset, TimeZone};
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::DateTime<FixedOffset> {
+        FixedOffset::west_opt(4 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(y, m, d, h, min, 0)
+            .unwrap()
+    }
+
     #[test]
-    fn relative_units() {
-        let now = 10_000_000_000;
-        assert_eq!(relative(now, None), "-");
-        assert_eq!(relative(now, Some(now - 30_000)), "now");
-        assert_eq!(relative(now, Some(now - 5 * 60_000)), "5m");
-        assert_eq!(relative(now, Some(now - 3 * 3_600_000)), "3h");
-        assert_eq!(relative(now, Some(now - 2 * 86_400_000)), "2d");
-        assert_eq!(relative(now, Some(now - 65 * 86_400_000)), "2mo");
-        assert_eq!(relative(now, Some(now - 800 * 86_400_000)), "2y");
-        assert_eq!(relative(now, Some(now + 60_000)), "now");
+    fn friendly_buckets_by_calendar_day() {
+        // Thursday, Sep 17 2026, 9:00 AM.
+        let now = at(2026, 9, 17, 9, 0);
+        let f = |ts| friendly_in(&now, &ts);
+        assert_eq!(f(at(2026, 9, 17, 6, 30)), "6:30 AM");
+        assert_eq!(f(at(2026, 9, 17, 0, 5)), "12:05 AM");
+        assert_eq!(f(at(2026, 9, 16, 23, 59)), "Yesterday 11:59 PM");
+        assert_eq!(f(at(2026, 9, 16, 0, 0)), "Yesterday 12:00 AM");
+        assert_eq!(f(at(2026, 9, 15, 13, 0)), "Last Tuesday");
+        assert_eq!(f(at(2026, 9, 11, 13, 0)), "Last Friday");
+        assert_eq!(f(at(2026, 9, 10, 13, 0)), "Last week");
+        assert_eq!(f(at(2026, 9, 4, 13, 0)), "Last week");
+        assert_eq!(f(at(2026, 9, 2, 13, 0)), "Earlier this month (9/2)");
+        assert_eq!(f(at(2026, 8, 22, 13, 0)), "Last month (8/22)");
+        assert_eq!(f(at(2026, 7, 14, 13, 0)), "7/14");
+        assert_eq!(f(at(2025, 12, 22, 13, 0)), "12/22/25");
+        // Clock skew: a slightly future timestamp is still "today".
+        assert_eq!(f(at(2026, 9, 17, 9, 5)), "9:05 AM");
+    }
+
+    #[test]
+    fn last_week_takes_precedence_over_month_boundaries() {
+        // Wednesday, Sep 2: Aug 25 is 8 days back, in the previous month.
+        let now = at(2026, 9, 2, 12, 0);
+        assert_eq!(friendly_in(&now, &at(2026, 8, 25, 12, 0)), "Last week");
+        assert_eq!(
+            friendly_in(&now, &at(2026, 8, 12, 12, 0)),
+            "Last month (8/12)"
+        );
+    }
+
+    #[test]
+    fn last_month_wraps_across_the_year() {
+        let now = at(2026, 1, 20, 12, 0);
+        assert_eq!(
+            friendly_in(&now, &at(2025, 12, 1, 12, 0)),
+            "Last month (12/1)"
+        );
+        assert_eq!(friendly_in(&now, &at(2025, 11, 1, 12, 0)), "11/1/25");
+    }
+
+    #[test]
+    fn exact_formats_full_date_and_time() {
+        assert_eq!(
+            exact_in(&at(2026, 9, 16, 6, 30)),
+            "Wed Sep 16, 2026 6:30 AM"
+        );
+        assert_eq!(
+            exact_in(&at(2026, 9, 16, 18, 5)),
+            "Wed Sep 16, 2026 6:05 PM"
+        );
+    }
+
+    #[test]
+    fn missing_timestamps_show_a_dash() {
+        assert_eq!(friendly(0, None), "-");
+        assert_eq!(exact(None), "-");
     }
 
     #[test]

@@ -56,11 +56,18 @@ impl Provider for ClaudeProvider {
     fn id(&self) -> &'static str {
         transcript::AGENT
     }
-    fn discover_sources(&self, settings: &Settings) -> anyhow::Result<Discovery> {
-        sources::discover(settings)
+    fn discover_sources(
+        &self,
+        settings: &Settings,
+        home: &crate::homes::Home,
+    ) -> anyhow::Result<Discovery> {
+        sources::discover(settings, home)
+    }
+    fn home_markers(&self) -> &'static [&'static str] {
+        &[".claude", ".ccs"]
     }
     fn store_for(&self, source: &Source) -> Option<PathBuf> {
-        std::fs::canonicalize(source.config_dir.join("projects"))
+        dunce::canonicalize(source.config_dir.join("projects"))
             .ok()
             .filter(|p| p.is_dir())
     }
@@ -113,12 +120,15 @@ mod tests {
             agent: "claude".into(),
             name: n.into(),
             config_dir: tmp.path().join(n),
+            env: crate::env::Env::Linux,
+            env_config_dir: tmp.path().join(n),
+            env_home: PathBuf::new(),
             launch: LaunchSpec::default(),
         };
         let p = ClaudeProvider;
         let a = p.store_for(&src("a")).unwrap();
         assert_eq!(a, p.store_for(&src("b")).unwrap());
-        assert_eq!(a, fs::canonicalize(&shared).unwrap());
+        assert_eq!(a, dunce::canonicalize(&shared).unwrap());
         assert!(p.store_for(&src("missing")).is_none());
     }
 
@@ -155,6 +165,9 @@ mod tests {
             agent: "claude".into(),
             name: "n".into(),
             config_dir: PathBuf::from("/c"),
+            env: crate::env::Env::Linux,
+            env_config_dir: PathBuf::from("/c"),
+            env_home: PathBuf::new(),
             launch,
         };
         let m = meta("abc", "/work/proj");

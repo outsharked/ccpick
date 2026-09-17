@@ -16,10 +16,19 @@ pub struct FakeProvider {
 
 impl FakeProvider {
     pub fn add_source(&mut self, name: &str, store: &str) {
+        self.add_source_in(name, store, crate::env::Env::Linux, "/fake");
+    }
+
+    /// A source in a specific environment (e.g. Windows seen from WSL).
+    pub fn add_source_in(&mut self, name: &str, store: &str, env: crate::env::Env, env_home: &str) {
+        let config_dir = PathBuf::from(format!("/fake/{name}"));
         self.sources.push(Source {
             agent: "fake".into(),
             name: name.into(),
-            config_dir: PathBuf::from(format!("/fake/{name}")),
+            env_config_dir: config_dir.clone(),
+            config_dir,
+            env,
+            env_home: PathBuf::from(env_home),
             launch: LaunchSpec {
                 argv_prefix: vec!["fake".into(), name.into()],
                 ..Default::default()
@@ -73,9 +82,18 @@ impl Provider for FakeProvider {
     fn id(&self) -> &'static str {
         "fake"
     }
-    fn discover_sources(&self, _settings: &Settings) -> anyhow::Result<Discovery> {
+    fn discover_sources(
+        &self,
+        _settings: &Settings,
+        home: &crate::homes::Home,
+    ) -> anyhow::Result<Discovery> {
+        let sources = if home.is_native() {
+            self.sources.clone()
+        } else {
+            Vec::new()
+        };
         Ok(Discovery {
-            sources: self.sources.clone(),
+            sources,
             warnings: vec![],
         })
     }
@@ -126,7 +144,13 @@ mod tests {
         let mut p = FakeProvider::default();
         p.add_source("one", "/s");
         p.add_session("/s", "a", "Title", 1, 2, &[(Role::User, "hi")]);
-        let src = &p.discover_sources(&Settings::default()).unwrap().sources[0];
+        let src = &p
+            .discover_sources(
+                &Settings::default(),
+                &crate::homes::Home::native(&Default::default(), "/fake".into()),
+            )
+            .unwrap()
+            .sources[0];
         let store = p.store_for(src).unwrap();
         let files = p.list_session_files(&store);
         assert_eq!(files.len(), 1);

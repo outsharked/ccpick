@@ -1,6 +1,8 @@
 //! Discovery of Claude config directories: ccs accounts, env, ~/.claude, config, CLI.
 use super::transcript::AGENT;
 use crate::config::Settings;
+use crate::env::Env;
+use crate::homes::Home;
 use crate::model::{Discovery, LaunchSpec, Source};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -60,11 +62,20 @@ fn bare_claude() -> LaunchSpec {
     }
 }
 
-fn source(name: String, config_dir: PathBuf, launch: LaunchSpec) -> Source {
+fn source(
+    name: String,
+    config_dir: PathBuf,
+    env: Env,
+    env_home: PathBuf,
+    launch: LaunchSpec,
+) -> Source {
     Source {
         agent: AGENT.into(),
         name,
+        env_config_dir: config_dir.clone(),
         config_dir,
+        env,
+        env_home,
         launch,
     }
 }
@@ -91,22 +102,33 @@ fn ccs_accounts(home: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
+pub fn discover(settings: &Settings, home: &Home) -> anyhow::Result<Discovery> {
     let cfg: ClaudeConfig = settings.agent_table(AGENT)?;
+    let host = &settings.host;
     let mut out = Discovery::default();
     let mut candidates: Vec<Candidate> = Vec::new();
+    let named = |name: String| match &home.label {
+        Some(label) => format!("{label}:{name}"),
+        None => name,
+    };
 
     if cfg.ccs {
-        match ccs_accounts(&settings.home) {
+        match ccs_accounts(&home.dir) {
             Ok(names) => {
                 for name in names {
-                    let dir = settings.home.join(".ccs/instances").join(&name);
+                    let dir = home.dir.join(".ccs").join("instances").join(&name);
                     let launch = LaunchSpec {
                         argv_prefix: vec!["ccs".into(), name.clone()],
                         ..Default::default()
                     };
                     candidates.push(Candidate {
-                        source: source(name, dir, launch),
+                        source: source(
+                            named(name),
+                            dir,
+                            home.env.clone(),
+                            home.env_dir.clone(),
+                            launch,
+                        ),
                         explicit: true,
                         needs_config_dir_env: false,
                     });
@@ -117,10 +139,18 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
     }
 
     if cfg.home {
-        if let Some(dir) = settings.env_var(ENV_CONFIG_DIR) {
+        if home.is_native()
+            && let Some(dir) = settings.env_var(ENV_CONFIG_DIR)
+        {
             let dir = settings.expand(dir);
             candidates.push(Candidate {
-                source: source(basename(&dir), dir, bare_claude()),
+                source: source(
+                    basename(&dir),
+                    dir,
+                    host.env.clone(),
+                    settings.home.clone(),
+                    bare_claude(),
+                ),
                 explicit: true,
                 needs_config_dir_env: true,
             });
@@ -131,38 +161,65 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
             ..Default::default()
         };
         candidates.push(Candidate {
-            source: source("claude".into(), settings.home.join(".claude"), launch),
+            source: source(
+                named("claude".into()),
+                home.dir.join(".claude"),
+                home.env.clone(),
+                home.env_dir.clone(),
+                launch,
+            ),
             explicit: false,
             needs_config_dir_env: false,
         });
     }
 
-    for sc in settings.file.sources.iter().filter(|s| s.agent == AGENT) {
-        let dir = settings.expand(&sc.config_dir);
-        let (launch, needs_config_dir_env) = match &sc.command {
-            Some(argv) if !argv.is_empty() => (
-                LaunchSpec {
-                    argv_prefix: argv.clone(),
-                    ..Default::default()
-                },
-                false,
-            ),
-            _ => (bare_claude(), true),
-        };
-        let name = sc.name.clone().unwrap_or_else(|| basename(&dir));
-        candidates.push(Candidate {
-            source: source(name, dir, launch),
-            explicit: true,
-            needs_config_dir_env,
-        });
-    }
+    if home.is_native() {
+        for sc in settings.file.sources.iter().filter(|s| s.agent == AGENT) {
+            let dir = settings.expand(&sc.config_dir);
+            let name = sc.name.clone().unwrap_or_else(|| basename(&dir));
+            let env = match &sc.env {
+                Some(text) => Env::parse(text).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "source {name}: invalid env {text:?} (use windows, linux, macos or wsl:<distro>)"
+                    )
+                })?,
+                None => host.infer_env(&dir),
+            };
+            let env_home = if env == host.env {
+                settings.home.clone()
+            } else {
+                PathBuf::new()
+            };
+            let (launch, needs_config_dir_env) = match &sc.command {
+                Some(argv) if !argv.is_empty() => (
+                    LaunchSpec {
+                        argv_prefix: argv.clone(),
+                        ..Default::default()
+                    },
+                    false,
+                ),
+                _ => (bare_claude(), true),
+            };
+            candidates.push(Candidate {
+                source: source(name, dir, env, env_home, launch),
+                explicit: true,
+                needs_config_dir_env,
+            });
+        }
 
-    for dir in &settings.cli_config_dirs {
-        candidates.push(Candidate {
-            source: source(basename(dir), dir.clone(), bare_claude()),
-            explicit: true,
-            needs_config_dir_env: true,
-        });
+        for dir in &settings.cli_config_dirs {
+            candidates.push(Candidate {
+                source: source(
+                    basename(dir),
+                    dir.clone(),
+                    host.env.clone(),
+                    settings.home.clone(),
+                    bare_claude(),
+                ),
+                explicit: true,
+                needs_config_dir_env: true,
+            });
+        }
     }
 
     let mut seen = HashSet::new();
@@ -172,11 +229,14 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
         needs_config_dir_env,
     } in candidates
     {
-        match std::fs::canonicalize(&source.config_dir) {
+        match dunce::canonicalize(&source.config_dir) {
             Ok(canonical) if canonical.is_dir() => {
+                source.env_config_dir = host.to_env(&canonical, &source.env);
                 if needs_config_dir_env {
-                    source.launch.env_set =
-                        vec![(ENV_CONFIG_DIR.into(), canonical.display().to_string())];
+                    source.launch.env_set = vec![(
+                        ENV_CONFIG_DIR.into(),
+                        source.env_config_dir.display().to_string(),
+                    )];
                 }
                 if seen.insert(canonical.clone()) {
                     source.config_dir = canonical;
@@ -198,6 +258,8 @@ pub fn discover(settings: &Settings) -> anyhow::Result<Discovery> {
 mod tests {
     use super::*;
     use crate::config::parse_config;
+    use crate::env::{Env, HostContext};
+    use crate::homes::Home;
     use std::fs;
 
     const CCS_YAML: &str = "default: \"c2\"\naccounts:\n  c1:\n    created: \"2026-01-01\"\n  c2:\n    created: \"2026-01-02\"\n  c3: {}\nprofiles: {}\n";
@@ -207,6 +269,10 @@ mod tests {
             home: home.to_path_buf(),
             ..Default::default()
         }
+    }
+
+    fn native(s: &Settings) -> Home {
+        Home::native(&s.host, s.home.clone())
     }
 
     fn setup_ccs(home: &Path) {
@@ -225,7 +291,8 @@ mod tests {
     fn ccs_accounts_default_first() {
         let tmp = tempfile::tempdir().unwrap();
         setup_ccs(tmp.path());
-        let d = discover(&settings(tmp.path())).unwrap();
+        let s = settings(tmp.path());
+        let d = discover(&s, &native(&s)).unwrap();
         assert_eq!(names(&d), vec!["c2", "c1", "c3"]);
         assert_eq!(d.sources[0].launch.argv_prefix, vec!["ccs", "c2"]);
         assert_eq!(d.sources[0].agent, "claude");
@@ -242,7 +309,7 @@ mod tests {
         setup_ccs(tmp.path());
         let mut s = settings(tmp.path());
         s.file = parse_config("[claude]\nccs = false").unwrap();
-        assert!(discover(&s).unwrap().sources.is_empty());
+        assert!(discover(&s, &native(&s)).unwrap().sources.is_empty());
     }
 
     #[test]
@@ -253,7 +320,10 @@ mod tests {
         let c1 = tmp.path().join(".ccs/instances/c1");
         s.env
             .insert(ENV_CONFIG_DIR.into(), c1.display().to_string());
-        assert_eq!(names(&discover(&s).unwrap()), vec!["c2", "c1", "c3"]);
+        assert_eq!(
+            names(&discover(&s, &native(&s)).unwrap()),
+            vec!["c2", "c1", "c3"]
+        );
     }
 
     #[test]
@@ -264,7 +334,7 @@ mod tests {
         let mut s = settings(tmp.path());
         s.env
             .insert(ENV_CONFIG_DIR.into(), dir.display().to_string());
-        let d = discover(&s).unwrap();
+        let d = discover(&s, &native(&s)).unwrap();
         assert_eq!(names(&d), vec!["alt-claude"]);
         assert_eq!(d.sources[0].launch.argv_prefix, vec!["claude"]);
         assert_eq!(
@@ -287,7 +357,7 @@ mod tests {
         let mut s = settings(tmp.path());
         s.env
             .insert(ENV_CONFIG_DIR.into(), non_canonical.display().to_string());
-        let d = discover(&s).unwrap();
+        let d = discover(&s, &native(&s)).unwrap();
         let canonical = fs::canonicalize(&real).unwrap();
         assert_eq!(names(&d), vec!["real"]);
         assert_eq!(d.sources[0].config_dir, canonical);
@@ -301,7 +371,8 @@ mod tests {
     fn home_claude_removes_env() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-        let d = discover(&settings(tmp.path())).unwrap();
+        let s = settings(tmp.path());
+        let d = discover(&s, &native(&s)).unwrap();
         assert_eq!(names(&d), vec!["claude"]);
         assert_eq!(
             d.sources[0].launch.env_remove,
@@ -312,7 +383,8 @@ mod tests {
     #[test]
     fn missing_home_claude_is_silent() {
         let tmp = tempfile::tempdir().unwrap();
-        let d = discover(&settings(tmp.path())).unwrap();
+        let s = settings(tmp.path());
+        let d = discover(&s, &native(&s)).unwrap();
         assert!(d.sources.is_empty());
         assert!(d.warnings.is_empty());
     }
@@ -329,7 +401,7 @@ mod tests {
         )
         .unwrap();
         s.cli_config_dirs = vec![cli.clone()];
-        let d = discover(&s).unwrap();
+        let d = discover(&s, &native(&s)).unwrap();
         assert_eq!(names(&d), vec!["work", "cli-dir"]);
         assert_eq!(d.sources[0].launch.argv_prefix, vec!["wrap", "-x"]);
         assert!(d.sources[0].launch.env_set.is_empty());
@@ -346,7 +418,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".ccs")).unwrap();
         fs::write(tmp.path().join(".ccs/config.yaml"), "accounts: [unclosed").unwrap();
-        let d = discover(&settings(tmp.path())).unwrap();
+        let s = settings(tmp.path());
+        let d = discover(&s, &native(&s)).unwrap();
         assert!(d.sources.is_empty());
         assert_eq!(d.warnings.len(), 1);
     }
@@ -356,6 +429,124 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut s = settings(tmp.path());
         s.file = parse_config("[claude]\nccs = \"yes\"").unwrap();
-        assert!(discover(&s).is_err());
+        assert!(discover(&s, &native(&s)).is_err());
+    }
+
+    fn windows_home_under_wsl(tmp: &Path) -> (Settings, Home) {
+        let root = dunce::canonicalize(tmp).unwrap();
+        let profile = root.join("mnt/c/Users/me");
+        fs::create_dir_all(profile.join(".ccs")).unwrap();
+        fs::write(profile.join(".ccs/config.yaml"), CCS_YAML).unwrap();
+        for n in ["c1", "c2", "c3"] {
+            fs::create_dir_all(profile.join(".ccs/instances").join(n)).unwrap();
+        }
+        fs::create_dir_all(profile.join(".claude")).unwrap();
+        let host = HostContext {
+            env: Env::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            wsl_mount_root: PathBuf::from(format!("{}/", root.join("mnt").display())),
+        };
+        let mut s = settings(&root.join("linux-home"));
+        s.host = host;
+        s.env
+            .insert(ENV_CONFIG_DIR.into(), "/should/not/apply".into());
+        s.cli_config_dirs = vec![root.join("cli-dir")];
+        let home = Home {
+            env: Env::Windows,
+            dir: profile,
+            env_dir: PathBuf::from(r"C:\Users\me"),
+            label: Some("win".into()),
+        };
+        (s, home)
+    }
+
+    #[test]
+    fn foreign_home_sources_are_prefixed_and_use_their_own_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (s, home) = windows_home_under_wsl(tmp.path());
+        let d = discover(&s, &home).unwrap();
+        assert_eq!(names(&d), vec!["win:c2", "win:c1", "win:c3", "win:claude"]);
+        assert!(d.sources.iter().all(|src| src.env == Env::Windows));
+        assert_eq!(
+            d.sources[1].env_config_dir,
+            PathBuf::from(r"C:\Users\me\.ccs\instances\c1")
+        );
+        assert_eq!(d.sources[1].env_home, PathBuf::from(r"C:\Users\me"));
+        assert_eq!(d.sources[1].launch.argv_prefix, vec!["ccs", "c1"]);
+    }
+
+    #[test]
+    fn env_var_config_and_cli_sources_only_apply_to_native_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (s, home) = windows_home_under_wsl(tmp.path());
+        let d = discover(&s, &home).unwrap();
+        assert!(d.warnings.is_empty());
+        assert!(
+            !names(&d)
+                .iter()
+                .any(|n| n.contains("cli-dir") || n.contains("apply"))
+        );
+    }
+
+    #[test]
+    fn configured_windows_path_is_inferred_and_uses_windows_env_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = windows_home_under_wsl(tmp.path());
+        s.env.clear();
+        s.cli_config_dirs.clear();
+        let dir = tmp.path().join("mnt/c/Users/me/.claude");
+        s.file = parse_config(&format!(
+            "[claude]\nccs = false\nhome = false\n\n[[source]]\nname = \"winclaude\"\nconfig_dir = \"{}\"\n",
+            dunce::canonicalize(&dir).unwrap().display()
+        ))
+        .unwrap();
+        let d = discover(&s, &native(&s)).unwrap();
+        assert_eq!(names(&d), vec!["winclaude"]);
+        assert_eq!(d.sources[0].env, Env::Windows);
+        assert_eq!(
+            d.sources[0].launch.env_set,
+            vec![(
+                ENV_CONFIG_DIR.to_string(),
+                r"C:\Users\me\.claude".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn explicit_source_env_overrides_and_invalid_env_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("cfg")).unwrap();
+        let mut s = settings(tmp.path());
+        s.file = parse_config(&format!(
+            "[claude]\nccs = false\nhome = false\n\n[[source]]\nconfig_dir = \"{}\"\nenv = \"wsl:Debian\"\n",
+            tmp.path().join("cfg").display()
+        ))
+        .unwrap();
+        let d = discover(&s, &native(&s)).unwrap();
+        assert_eq!(
+            d.sources[0].env,
+            Env::Wsl {
+                distro: "Debian".into()
+            }
+        );
+
+        s.file = parse_config(&format!(
+            "[[source]]\nconfig_dir = \"{}\"\nenv = \"dos\"\n",
+            tmp.path().join("cfg").display()
+        ))
+        .unwrap();
+        assert!(discover(&s, &native(&s)).is_err());
+    }
+
+    #[test]
+    fn native_sources_record_host_env_and_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+        let s = settings(tmp.path());
+        let d = discover(&s, &native(&s)).unwrap();
+        assert_eq!(d.sources[0].env, Env::Linux);
+        assert_eq!(d.sources[0].env_home, tmp.path());
+        assert_eq!(d.sources[0].env_config_dir, d.sources[0].config_dir);
     }
 }

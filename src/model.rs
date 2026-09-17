@@ -16,7 +16,14 @@ pub struct LaunchSpec {
 pub struct Source {
     pub agent: String,
     pub name: String,
+    /// Canonical path ccpick reads.
     pub config_dir: PathBuf,
+    /// Environment the source belongs to.
+    pub env: crate::env::Env,
+    /// `config_dir` as the source's own environment sees it (used in commands for the user).
+    pub env_config_dir: PathBuf,
+    /// Home directory as the source's environment sees it, for `~` shortening (empty if unknown).
+    pub env_home: PathBuf,
     pub launch: LaunchSpec,
 }
 
@@ -74,8 +81,17 @@ pub struct Discovery {
 pub trait Provider: Send + Sync {
     /// Stable id used in config, cache keys and the UI.
     fn id(&self) -> &'static str;
-    /// Sources for this agent. Err = invalid explicit configuration (fatal).
-    fn discover_sources(&self, settings: &Settings) -> anyhow::Result<Discovery>;
+    /// Sources for this agent in one home. Err = invalid explicit configuration (fatal).
+    fn discover_sources(
+        &self,
+        settings: &Settings,
+        home: &crate::homes::Home,
+    ) -> anyhow::Result<Discovery>;
+    /// Entries (e.g. a config directory name) whose presence makes a directory worth scanning
+    /// as a home in another environment.
+    fn home_markers(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// Canonical transcript store for a source, if present.
     fn store_for(&self, source: &Source) -> Option<PathBuf>;
     fn list_session_files(&self, store: &Path) -> Vec<PathBuf>;

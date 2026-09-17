@@ -40,7 +40,8 @@ impl Catalog {
         let mut source_provider = Vec::new();
         let mut warnings = Vec::new();
         for (pi, provider) in providers.iter().enumerate() {
-            let discovery = provider.discover_sources(settings)?;
+            let home = crate::homes::Home::native(&settings.host, settings.home.clone());
+            let discovery = provider.discover_sources(settings, &home)?;
             warnings.extend(discovery.warnings);
             for source in discovery.sources {
                 sources.push(source);

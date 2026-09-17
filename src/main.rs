@@ -75,10 +75,19 @@ fn run() -> Result<i32> {
         return Ok(0);
     }
     match ui::run(std::sync::Arc::new(catalog), &query)? {
-        Some(plan) => {
-            let err = launch::exec(&plan);
-            anyhow::bail!("failed to launch {}: {err}", plan.argv.join(" "))
-        }
+        Some(plan) => launch_session(&plan),
         None => Ok(0),
     }
+}
+
+#[cfg(unix)]
+fn launch_session(plan: &ccpick::model::LaunchPlan) -> Result<i32> {
+    let err = launch::exec(plan);
+    anyhow::bail!("failed to launch {}: {err}", plan.argv.join(" "))
+}
+
+#[cfg(windows)]
+fn launch_session(plan: &ccpick::model::LaunchPlan) -> Result<i32> {
+    launch::run_and_wait(plan)
+        .map_err(|err| anyhow::anyhow!("failed to launch {}: {err}", plan.argv.join(" ")))
 }

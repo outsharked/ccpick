@@ -58,12 +58,13 @@ fn event_loop(
                 let generation = worker.submit(&query);
                 app.set_text_generation(generation);
             }
-            Action::Launch(plan) => {
-                if find_in_path(&plan.argv[0]).is_some() {
+            Action::Launch(mut plan) => match find_in_path(&plan.argv[0]) {
+                Some(path) => {
+                    plan.argv[0] = path.display().to_string();
                     return Ok(Some(plan));
                 }
-                app.status = Some(format!("{} not found on PATH", plan.argv[0]));
-            }
+                None => app.status = Some(format!("{} not found on PATH", plan.argv[0])),
+            },
             Action::Copy(text) => {
                 let result = crate::clipboard::copy(&text, &app.catalog.host.env);
                 app.set_copy_result(result);

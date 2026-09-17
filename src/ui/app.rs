@@ -33,6 +33,18 @@ pub enum Action {
     Quit,
     Launch(LaunchPlan),
     Search(String),
+    Copy(String),
+}
+
+/// Shown instead of launching when a session belongs to another environment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResumeDialog {
+    pub session: usize,
+    pub source: usize,
+    pub command: String,
+    pub dir_missing: bool,
+    /// Result of the last copy attempt.
+    pub note: Option<String>,
 }
 
 /// Preview geometry reported by the renderer each frame, used to clamp scrolling.
@@ -67,6 +79,7 @@ pub struct App {
     /// Renderer's measured layout for the previewed session.
     pub(crate) preview_layout: Option<super::render::PreviewLayout>,
     pub status: Option<String>,
+    pub dialog: Option<ResumeDialog>,
     source_override: HashMap<usize, usize>,
     text_hits: Vec<TextHit>,
     text_generation: u64,
@@ -87,6 +100,7 @@ impl App {
             preview_metrics: None,
             preview_layout: None,
             status: None,
+            dialog: None,
             source_override: HashMap::new(),
             text_hits: Vec::new(),
             text_generation: 0,
@@ -289,6 +303,55 @@ impl App {
         self.status = Some(format!("resume via {}", self.catalog.sources[next].name));
     }
 
+    pub fn set_copy_result(&mut self, result: Result<&'static str, String>) {
+        if let Some(dialog) = &mut self.dialog {
+            dialog.note = Some(match result {
+                Ok(how) => format!("copied ({how})"),
+                Err(e) => e,
+            });
+        }
+    }
+
+    fn open_dialog(&mut self, idx: usize) {
+        let source = self.launch_source(idx);
+        let plan = self.catalog.launch_plan(idx, source);
+        let command = crate::shell::resume_command(&plan, &self.catalog.sources[source].env);
+        let dir_missing = self
+            .catalog
+            .host_cwd(idx, source)
+            .is_some_and(|p| !p.is_dir());
+        self.dialog = Some(ResumeDialog {
+            session: idx,
+            source,
+            command,
+            dir_missing,
+            note: None,
+        });
+    }
+
+    fn handle_dialog_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Char('c'), true) => Action::Quit,
+            (KeyCode::Esc, _) => {
+                self.dialog = None;
+                Action::None
+            }
+            (KeyCode::Char('c'), false) => match &self.dialog {
+                Some(d) => Action::Copy(d.command.clone()),
+                None => Action::None,
+            },
+            (KeyCode::Char('a'), true) => {
+                if let Some(idx) = self.dialog.as_ref().map(|d| d.session) {
+                    self.cycle_source();
+                    self.open_dialog(idx);
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn enter(&mut self) -> Action {
         let Some(idx) = self.selected_session() else {
             return Action::None;
@@ -303,10 +366,7 @@ impl App {
         }
         let source = self.launch_source(idx);
         if !self.catalog.is_launchable(source) {
-            self.status = Some(format!(
-                "this session lives in {} — resume it there",
-                self.catalog.sources[source].env.display_name()
-            ));
+            self.open_dialog(idx);
             return Action::None;
         }
         match self.catalog.host_cwd(idx, source) {
@@ -323,6 +383,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if self.dialog.is_some() {
+            return self.handle_dialog_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, ctrl) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), true) => Action::Quit,
@@ -517,15 +580,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enter_on_foreign_session_does_not_launch() {
+    fn foreign_app() -> App {
         let mut a = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
-        a.selected = 1; // session "w" (older)
+        a.selected = 1; // session "w"
+        a
+    }
+
+    #[test]
+    fn enter_on_foreign_session_opens_resume_dialog() {
+        let mut a = foreign_app();
         assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
+        let d = a.dialog.clone().expect("dialog open");
         assert_eq!(
-            a.status.as_deref(),
-            Some("this session lives in Windows — resume it there")
+            d.command,
+            r"Set-Location 'C:\Users\me\proj'; fake win:c1 --resume w"
         );
+        assert!(d.dir_missing);
+        assert_eq!(d.note, None);
+    }
+
+    #[test]
+    fn dialog_keys_copy_close_and_capture_input() {
+        let mut a = foreign_app();
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.handle_key(key(KeyCode::Char('x'))), Action::None);
+        assert_eq!(a.query, "");
+        let command = a.dialog.as_ref().unwrap().command.clone();
+        assert_eq!(a.handle_key(key(KeyCode::Char('c'))), Action::Copy(command));
+        a.set_copy_result(Ok("clip.exe"));
+        assert_eq!(
+            a.dialog.as_ref().unwrap().note.as_deref(),
+            Some("copied (clip.exe)")
+        );
+        a.set_copy_result(Err("could not copy: nope".into()));
+        assert_eq!(
+            a.dialog.as_ref().unwrap().note.as_deref(),
+            Some("could not copy: nope")
+        );
+        assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.dialog.is_none());
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.handle_key(ctrl('c')), Action::Quit);
+    }
+
+    #[test]
+    fn native_session_in_wsl_host_still_launches() {
+        let mut a = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
+        a.selected = 0; // session "n", cwd /tmp
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Launch(_)
+        ));
+        assert!(a.dialog.is_none());
     }
 
     #[test]

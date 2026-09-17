@@ -7,8 +7,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Wrap,
 };
 
 const LIST_HELP: &str = " ↵ resume  → preview  ^A source  ^R running only  ^S sort  esc quit";
@@ -81,6 +81,68 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64) {
         .dim(),
     };
     frame.render_widget(Paragraph::new(footer_line), footer);
+
+    if app.dialog.is_some() {
+        draw_dialog(frame, app);
+    }
+}
+
+fn draw_dialog(frame: &mut Frame, app: &App) {
+    let Some(dialog) = &app.dialog else {
+        return;
+    };
+    let source = &app.catalog.sources[dialog.source];
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).clamp(20, 90).min(area.width);
+    let mut lines = vec![
+        Line::from(format!(
+            "This session lives in {}. Paste into {}:",
+            source.env.display_name(),
+            source.env.shell_name()
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            dialog.command.clone(),
+            Style::new().fg(Color::Cyan),
+        )),
+    ];
+    if dialog.dir_missing {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Note: the project directory no longer exists.",
+            Style::new().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(match &dialog.note {
+        Some(note) => Line::from(Span::styled(note.clone(), Style::new().fg(Color::Yellow))),
+        None => Line::from(" c copy   ^A source   esc close").dim(),
+    });
+    let inner_width = width.saturating_sub(4).max(1);
+    let content_height = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width) as u16;
+    let height = content_height.saturating_add(2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    " Resume in {} · {} ",
+                    source.env.display_name(),
+                    source.name
+                ))
+                .padding(Padding::horizontal(1)),
+        ),
+        rect,
+    );
 }
 
 fn draw_list(frame: &mut Frame, app: &App, area: Rect, now_ms: i64) {
@@ -631,6 +693,26 @@ mod tests {
         ];
         p.add_session("/s", "a", "Wrapped convo", 1000, 1000, &messages);
         crate::catalog::build_fake(p)
+    }
+
+    #[test]
+    fn renders_resume_dialog() {
+        let mut app = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
+        app.selected = 1;
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        let text: String = draw_to(&mut app, 100, 30)
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Resume in Windows"));
+        assert!(text.contains("Paste into PowerShell"));
+        assert!(text.contains("Set-Location"));
+        assert!(text.contains("no longer exists"));
+        assert!(text.contains("c copy"));
     }
 
     #[test]

@@ -64,6 +64,10 @@ fn event_loop(
                 }
                 app.status = Some(format!("{} not found on PATH", plan.argv[0]));
             }
+            Action::Copy(text) => {
+                let result = crate::clipboard::copy(&text, &app.catalog.host.env);
+                app.set_copy_result(result);
+            }
         }
     }
 }

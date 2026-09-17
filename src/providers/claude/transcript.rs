@@ -198,7 +198,7 @@ pub fn messages(path: &Path) -> Vec<Message> {
 /// Path of a test fixture under `tests/fixtures/claude/`.
 #[cfg(test)]
 pub fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    crate::testutil::manifest_dir()
         .join("tests/fixtures/claude")
         .join(name)
 }

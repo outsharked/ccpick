@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(d.sources[0].agent, "claude");
         assert_eq!(
             d.sources[0].config_dir,
-            fs::canonicalize(tmp.path().join(".ccs/instances/c2")).unwrap()
+            dunce::canonicalize(tmp.path().join(".ccs/instances/c2")).unwrap()
         );
         assert!(d.warnings.is_empty());
     }
@@ -358,7 +358,7 @@ mod tests {
         s.env
             .insert(ENV_CONFIG_DIR.into(), non_canonical.display().to_string());
         let d = discover(&s, &native(&s)).unwrap();
-        let canonical = fs::canonicalize(&real).unwrap();
+        let canonical = dunce::canonicalize(&real).unwrap();
         assert_eq!(names(&d), vec!["real"]);
         assert_eq!(d.sources[0].config_dir, canonical);
         assert_eq!(
@@ -461,7 +461,13 @@ mod tests {
         (s, home)
     }
 
+    // `windows_home_under_wsl` fakes a WSL host observing a Windows home mounted at
+    // `/mnt/c/...`, which only exists as a real path shape when the test binary itself runs on
+    // a Unix-like OS (forward-slash paths). A native Windows test process can't produce that
+    // path shape even with an injected `HostContext`, since `dunce::canonicalize` always
+    // normalizes to backslashes there.
     #[test]
+    #[cfg(unix)]
     fn foreign_home_sources_are_prefixed_and_use_their_own_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let (s, home) = windows_home_under_wsl(tmp.path());
@@ -489,7 +495,11 @@ mod tests {
         );
     }
 
+    // Same reason as `foreign_home_sources_are_prefixed_and_use_their_own_paths`: relies on a
+    // genuine forward-slash WSL mount path shape that native Windows canonicalization can't
+    // produce.
     #[test]
+    #[cfg(unix)]
     fn configured_windows_path_is_inferred_and_uses_windows_env_value() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, _) = windows_home_under_wsl(tmp.path());
@@ -518,8 +528,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("cfg")).unwrap();
         let mut s = settings(tmp.path());
+        // Literal (single-quoted) TOML strings don't process `\`, so a Windows path embeds
+        // safely without escaping.
         s.file = parse_config(&format!(
-            "[claude]\nccs = false\nhome = false\n\n[[source]]\nconfig_dir = \"{}\"\nenv = \"wsl:Debian\"\n",
+            "[claude]\nccs = false\nhome = false\n\n[[source]]\nconfig_dir = '{}'\nenv = \"wsl:Debian\"\n",
             tmp.path().join("cfg").display()
         ))
         .unwrap();
@@ -532,7 +544,7 @@ mod tests {
         );
 
         s.file = parse_config(&format!(
-            "[[source]]\nconfig_dir = \"{}\"\nenv = \"dos\"\n",
+            "[[source]]\nconfig_dir = '{}'\nenv = \"dos\"\n",
             tmp.path().join("cfg").display()
         ))
         .unwrap();

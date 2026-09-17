@@ -112,6 +112,7 @@ mod tests {
     use std::fs;
 
     #[test]
+    #[cfg(unix)]
     fn symlinked_projects_share_a_store() {
         let tmp = tempfile::tempdir().unwrap();
         let shared = tmp.path().join("shared/projects");
@@ -213,8 +214,7 @@ mod tests {
 
     #[test]
     fn may_contain_prefilters_raw_bytes() {
-        let fixture =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/basic.jsonl");
+        let fixture = crate::testutil::manifest_dir().join("tests/fixtures/claude/basic.jsonl");
         let p = ClaudeProvider;
         assert!(p.may_contain(&fixture, "dockerfile"));
         assert!(!p.may_contain(&fixture, "zzzzqqq"));

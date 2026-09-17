@@ -411,8 +411,7 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         let file = proj.join("basic.jsonl");
         std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/claude/basic.jsonl"),
+            crate::testutil::manifest_dir().join("tests/fixtures/claude/basic.jsonl"),
             &file,
         )
         .unwrap();
@@ -437,7 +436,7 @@ mod tests {
         assert_eq!(cache.len(), 1);
 
         // Plant a different title under the same stamp; a cache hit must return it.
-        let canonical = std::fs::canonicalize(&file).unwrap();
+        let canonical = dunce::canonicalize(&file).unwrap();
         let mut planted = c1.sessions[0].meta.clone();
         planted.title = "CACHED".into();
         cache.put(

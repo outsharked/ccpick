@@ -12,4 +12,6 @@ pub mod providers;
 pub mod report;
 pub mod search;
 pub mod shell;
+#[cfg(test)]
+pub mod testutil;
 pub mod ui;

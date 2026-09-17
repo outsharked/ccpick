@@ -34,6 +34,14 @@ run = "cargo build --release"
 description = "Install the release binary to ~/.cargo/bin"
 run = "cargo install --path ."
 
+[tasks.test-windows]
+description = "WSL only: build tests for Windows (mingw) and run them via interop"
+run = 'WSLENV="CARGO_MANIFEST_DIR/p${WSLENV:+:$WSLENV}" cargo test --target x86_64-pc-windows-gnu'
+
+[tasks.lint-windows]
+description = "Clippy for the Windows target (warnings as errors)"
+run = "cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings"
+
 [tasks.release]
 description = "Bump the version, run checks, commit and tag (then: git push --follow-tags)"
 usage = 'arg "<version>" help="New version without the v, e.g. 0.2.0"'

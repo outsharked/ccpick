@@ -56,6 +56,7 @@ mod tests {
     use crate::env::Env;
     use crate::process::ProcessProbe;
     use std::fs;
+    #[cfg(target_os = "linux")]
     use std::process::Command;
 
     fn records(dir: &Path) -> Vec<LaunchRecord> {
@@ -91,6 +92,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn live_claude_process_is_alive() {
         let tmp = tempfile::tempdir().unwrap();
         let fake_claude = tmp.path().join("claude-fake");
@@ -107,6 +109,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn non_claude_process_is_not_alive() {
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         let pid = child.id();

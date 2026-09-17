@@ -22,13 +22,23 @@ pub fn exec(plan: &LaunchPlan) -> std::io::Error {
     command(plan).exec()
 }
 
+/// Claims every Ctrl-C/Ctrl-Break event as handled (returns TRUE) without acting on it, so
+/// ccpick itself ignores them while the agent runs.
+#[cfg(windows)]
+unsafe extern "system" fn ignore_ctrl_c(_event: u32) -> windows_sys::core::BOOL {
+    1
+}
+
 /// Runs the agent in this console and returns its exit code. Ctrl-C goes to the agent, not
 /// ccpick, while it runs.
 #[cfg(windows)]
 pub fn run_and_wait(plan: &LaunchPlan) -> std::io::Result<i32> {
-    // SAFETY: a null handler with TRUE makes this process ignore Ctrl-C; the child still gets it.
+    // SAFETY: `ignore_ctrl_c` matches the required PHANDLER_ROUTINE signature. Registering an
+    // explicit handler function (rather than passing a null handler, which every child process
+    // inherits and would make the launched agent ignore Ctrl-C too) is process-local: the child
+    // still gets its own default Ctrl-C handling.
     unsafe {
-        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 1);
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(ignore_ctrl_c), 1);
     }
     let status = command(plan).status()?;
     Ok(status.code().unwrap_or(1))

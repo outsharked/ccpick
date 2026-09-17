@@ -190,8 +190,11 @@ Enter on a non-running session whose launch source is not launchable opens a cen
 
 - **Launch:** no `exec`. Restore the terminal, resolve `argv[0]` against `PATH` using `PATHEXT`
   (so `ccs` → `ccs.cmd`), spawn with the plan's cwd/env and inherited stdio, ignore Ctrl-C in
-  ccpick while waiting (`SetConsoleCtrlHandler(None, TRUE)`), then exit with the child's code.
-  `launch::find_in_path` gains `PATHEXT` handling on Windows (and keeps its Unix behaviour).
+  ccpick while waiting by registering a handler function that returns TRUE
+  (`SetConsoleCtrlHandler(Some(handler), TRUE)`) rather than a null handler — a null handler is
+  inherited by the child process and would make the launched agent ignore Ctrl-C too — then exit
+  with the child's code. `launch::find_in_path` gains `PATHEXT` handling on Windows (and keeps its
+  Unix behaviour).
 - **Canonical paths:** use `dunce::canonicalize` everywhere paths are canonicalized, so Windows
   paths don't carry the `\\?\` verbatim prefix (display and dedupe stay consistent).
 - **Config/cache:** unchanged code; `dirs` yields `%APPDATA%\ccpick\config.toml` and

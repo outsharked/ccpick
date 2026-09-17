@@ -1808,7 +1808,7 @@ mod tests {
     #[test]
     fn parses_pid_domains() {
         assert_eq!(PidDomain::parse("linux:abc:pid:[1]"), Some(PidDomain::Linux));
-        assert_eq!(PidDomain::parse("win32:music3"), Some(PidDomain::Windows));
+        assert_eq!(PidDomain::parse("win32:host"), Some(PidDomain::Windows));
         assert_eq!(PidDomain::parse("darwin:x"), None);
         assert_eq!(PidDomain::of(&ubuntu()), Some(PidDomain::Linux));
         assert_eq!(PidDomain::of(&Env::Windows), Some(PidDomain::Windows));

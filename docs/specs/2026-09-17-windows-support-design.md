@@ -34,9 +34,9 @@ pub enum Env {
 pub struct Home {
     pub env: Env,
     /// The home directory as ccpick can read it (host form),
-    /// e.g. /mnt/c/Users/jamie from WSL, \\wsl.localhost\Ubuntu\home\me from Windows.
+    /// e.g. /mnt/c/Users/me from WSL, \\wsl.localhost\Ubuntu\home\me from Windows.
     pub dir: PathBuf,
-    /// The same directory as its own environment sees it, e.g. C:\Users\jamie, /home/me.
+    /// The same directory as its own environment sees it, e.g. C:\Users\me, /home/me.
     pub env_dir: PathBuf,
     /// Prefix for source names; None for the native home.
     pub label: Option<String>,
@@ -157,7 +157,7 @@ Enter on a non-running session whose launch source is not launchable opens a cen
 ┌ Resume in Windows · win:c2 ───────────────────────────────┐
 │ This session lives in Windows. Paste into PowerShell:     │
 │                                                           │
-│ Set-Location 'C:\Users\jamie\proj'; ccs c2 --resume 0d42… │
+│ Set-Location 'C:\Users\me\proj'; ccs c2 --resume 0d42…    │
 │                                                           │
 │ c copy   ^A source   esc close                            │
 └───────────────────────────────────────────────────────────┘

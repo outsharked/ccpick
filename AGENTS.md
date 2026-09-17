@@ -2,7 +2,7 @@
 
 ccpick is a Rust TUI (ratatui) that finds and resumes Claude Code sessions across multiple
 config directories (ccs accounts, `~/.claude`, `$CLAUDE_CONFIG_DIR`, configured dirs). Design:
-`docs/superpowers/specs/2026-09-16-ccpick-design.md`.
+`docs/specs/2026-09-16-ccpick-design.md`.
 
 ## Builds and checks
 
@@ -77,4 +77,6 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
 - Commit only when asked; never push, tag, or publish a release unless asked.
 - This is a public repo: keep README, docs, examples and test data generic — no personal paths,
   hostnames, usernames or private infrastructure names.
-- Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
+- Design specs go in `docs/specs/` and implementation plans in `docs/plans/`, named
+  `YYYY-MM-DD-<topic>-design.md` / `YYYY-MM-DD-<topic>.md`. Never use `docs/superpowers/` (or any
+  other tool-specific directory), even if a skill or template suggests it.

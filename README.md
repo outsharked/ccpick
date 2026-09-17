@@ -102,7 +102,7 @@ git push --follow-tags     # CI builds binaries and publishes the GitHub release
 
 ## Design
 
-See `docs/superpowers/specs/2026-09-16-ccpick-design.md`. Agent-specific code lives behind a
+See `docs/specs/2026-09-16-ccpick-design.md`. Agent-specific code lives behind a
 `Provider` trait in `src/providers/`, so other agents (e.g. Codex CLI) can be added later.
 
 ## License

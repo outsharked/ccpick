@@ -1,53 +1,73 @@
 //! Copy text to the system clipboard with whatever the host offers, falling back to OSC 52.
-use crate::env::Env;
+use crate::env::{Env, HostContext};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 struct Tool {
-    program: &'static str,
+    /// Program to spawn: a bare name found via `PATH`, or (for a WSL host whose PATH doesn't
+    /// include Windows tools) a fixed fallback path.
+    program: String,
     args: &'static [&'static str],
     utf16: bool,
+    /// Name reported on success; the tool's usual name even when `program` is a fallback path.
+    label: &'static str,
+}
+
+/// Candidate tools to try, in order, for `host`. A WSL or native Windows host tries `clip.exe`
+/// by name first, then (WSL only, when Windows tools aren't on `PATH`) its fixed location under
+/// the WSL mount's `Windows\System32`.
+fn tools_for(host: &HostContext) -> Vec<Tool> {
+    match &host.env {
+        Env::Wsl { .. } | Env::Windows => {
+            crate::env::windows_tool_candidates("clip.exe", &host.wsl_mount_root)
+                .into_iter()
+                .map(|p| Tool {
+                    program: p.to_string_lossy().into_owned(),
+                    args: &[],
+                    utf16: true,
+                    label: "clip.exe",
+                })
+                .collect()
+        }
+        Env::MacOs => vec![Tool {
+            program: "pbcopy".into(),
+            args: &[],
+            utf16: false,
+            label: "pbcopy",
+        }],
+        Env::Linux => vec![
+            Tool {
+                program: "wl-copy".into(),
+                args: &[],
+                utf16: false,
+                label: "wl-copy",
+            },
+            Tool {
+                program: "xclip".into(),
+                args: &["-selection", "clipboard"],
+                utf16: false,
+                label: "xclip",
+            },
+            Tool {
+                program: "xsel".into(),
+                args: &["-b", "-i"],
+                utf16: false,
+                label: "xsel",
+            },
+        ],
+    }
 }
 
 /// Returns a short description of how the text was copied.
-pub fn copy(text: &str, host: &Env) -> Result<&'static str, String> {
-    let tools: &[Tool] = match host {
-        Env::Wsl { .. } | Env::Windows => &[Tool {
-            program: "clip.exe",
-            args: &[],
-            utf16: true,
-        }],
-        Env::MacOs => &[Tool {
-            program: "pbcopy",
-            args: &[],
-            utf16: false,
-        }],
-        Env::Linux => &[
-            Tool {
-                program: "wl-copy",
-                args: &[],
-                utf16: false,
-            },
-            Tool {
-                program: "xclip",
-                args: &["-selection", "clipboard"],
-                utf16: false,
-            },
-            Tool {
-                program: "xsel",
-                args: &["-b", "-i"],
-                utf16: false,
-            },
-        ],
-    };
-    for tool in tools {
+pub fn copy(text: &str, host: &HostContext) -> Result<&'static str, String> {
+    for tool in tools_for(host) {
         let input = if tool.utf16 {
             utf16le_with_bom(text)
         } else {
             text.as_bytes().to_vec()
         };
-        if pipe_to(tool.program, tool.args, &input) {
-            return Ok(tool.program);
+        if pipe_to(&tool.program, tool.args, &input) {
+            return Ok(tool.label);
         }
     }
     osc52(text)
@@ -110,6 +130,25 @@ pub fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wsl_host_tries_plain_clip_then_the_system32_fallback() {
+        let host = crate::env::HostContext {
+            env: Env::Wsl {
+                distro: "Ubuntu".into(),
+            },
+            wsl_mount_root: std::path::PathBuf::from("/mnt/"),
+        };
+        let programs: Vec<String> = tools_for(&host).into_iter().map(|t| t.program).collect();
+        assert_eq!(
+            programs,
+            vec![
+                "clip.exe".to_string(),
+                "/mnt/c/Windows/System32/clip.exe".to_string()
+            ]
+        );
+        assert!(tools_for(&host).iter().all(|t| t.label == "clip.exe"));
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {

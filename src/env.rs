@@ -275,6 +275,22 @@ pub fn unc_to_linux(path: &str) -> Option<(String, String)> {
     ))
 }
 
+/// Where to find a Windows tool (`tasklist.exe`, `clip.exe`) ccpick shells out to from a WSL
+/// host, in order: first the plain name (works via `PATH` when Windows interop appends it, the
+/// default), then its fixed location under the WSL mount's `Windows\System32`, for a host with
+/// `[interop] appendWindowsPath = false` in `wsl.conf`.
+pub fn windows_tool_candidates(name: &str, wsl_mount_root: &Path) -> Vec<PathBuf> {
+    // Built with an explicit `/` rather than `Path::join` (whose separator depends on the
+    // *compiling* target) because `wsl_mount_root` is always a WSL-side (forward-slash) path,
+    // regardless of what platform this binary itself was built for.
+    let root = wsl_mount_root.to_string_lossy();
+    let root = root.trim_end_matches('/');
+    vec![
+        PathBuf::from(name),
+        PathBuf::from(format!("{root}/c/Windows/System32/{name}")),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +435,24 @@ mod tests {
             Some(("Ubuntu".into(), "/".into()))
         );
         assert_eq!(unc_to_linux(r"C:\Users"), None);
+    }
+
+    #[test]
+    fn windows_tool_candidates_tries_plain_name_then_the_system32_fallback() {
+        assert_eq!(
+            windows_tool_candidates("tasklist.exe", Path::new("/mnt/")),
+            vec![
+                PathBuf::from("tasklist.exe"),
+                PathBuf::from("/mnt/c/Windows/System32/tasklist.exe"),
+            ]
+        );
+        assert_eq!(
+            windows_tool_candidates("clip.exe", Path::new("/custom-root/")),
+            vec![
+                PathBuf::from("clip.exe"),
+                PathBuf::from("/custom-root/c/Windows/System32/clip.exe"),
+            ]
+        );
     }
 
     #[test]

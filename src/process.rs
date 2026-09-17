@@ -1,6 +1,7 @@
 //! "Is this process running?" for pids in Linux or Windows process namespaces. Agent-neutral.
-use crate::env::Env;
+use crate::env::{Env, HostContext};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,15 +40,29 @@ type Snapshot = Result<HashMap<u32, String>, String>;
 /// image name that call supplies, so `tasklist.exe` doesn't have to enumerate every process.
 pub struct ProcessProbe {
     host: Env,
+    /// WSL drive mount root, for finding `tasklist.exe` when it isn't on `PATH`
+    /// (`appendWindowsPath = false` in `wsl.conf`). Only meaningful on a WSL host.
+    wsl_mount_root: PathBuf,
     snapshot: OnceLock<Snapshot>,
     /// How to take the Windows snapshot, filtered by image name; swappable in tests.
-    snapshotter: fn(&str) -> Snapshot,
+    snapshotter: fn(&str, &Path) -> Snapshot,
 }
 
 impl ProcessProbe {
     pub fn new(host: Env) -> ProcessProbe {
         ProcessProbe {
             host,
+            wsl_mount_root: PathBuf::from("/mnt/"),
+            snapshot: OnceLock::new(),
+            snapshotter: take_tasklist_snapshot,
+        }
+    }
+
+    /// A probe for the real host, whose WSL mount root (if any) comes from `host`.
+    pub fn from_host(host: &HostContext) -> ProcessProbe {
+        ProcessProbe {
+            host: host.env.clone(),
+            wsl_mount_root: host.wsl_mount_root.clone(),
             snapshot: OnceLock::new(),
             snapshotter: take_tasklist_snapshot,
         }
@@ -63,9 +78,22 @@ impl ProcessProbe {
     /// A probe whose Windows snapshot is taken by `snapshotter`, for testing the real
     /// spawn/join and panic-recovery paths without shelling out to `tasklist.exe`.
     #[cfg(test)]
-    pub fn with_windows_snapshotter(host: Env, snapshotter: fn(&str) -> Snapshot) -> ProcessProbe {
+    pub fn with_windows_snapshotter(
+        host: Env,
+        snapshotter: fn(&str, &Path) -> Snapshot,
+    ) -> ProcessProbe {
+        Self::with_windows_snapshotter_and_root(host, snapshotter, PathBuf::from("/mnt/"))
+    }
+
+    #[cfg(test)]
+    pub fn with_windows_snapshotter_and_root(
+        host: Env,
+        snapshotter: fn(&str, &Path) -> Snapshot,
+        wsl_mount_root: PathBuf,
+    ) -> ProcessProbe {
         ProcessProbe {
             host,
+            wsl_mount_root,
             snapshot: OnceLock::new(),
             snapshotter,
         }
@@ -77,7 +105,8 @@ impl ProcessProbe {
         self.snapshot.get_or_init(|| {
             let snapshotter = self.snapshotter;
             let name = name.to_string();
-            std::thread::spawn(move || snapshotter(&name))
+            let root = self.wsl_mount_root.clone();
+            std::thread::spawn(move || snapshotter(&name, &root))
                 .join()
                 .unwrap_or_else(|_| Err("tasklist.exe snapshot panicked".into()))
         })
@@ -163,15 +192,23 @@ fn tasklist_args(name: &str) -> Vec<String> {
     ]
 }
 
-fn take_tasklist_snapshot(name: &str) -> Snapshot {
-    let output = std::process::Command::new("tasklist.exe")
-        .args(tasklist_args(name))
-        .output()
-        .map_err(|e| format!("could not run tasklist.exe for Windows session status: {e}"))?;
-    if !output.status.success() {
-        return Err(format!("tasklist.exe failed ({})", output.status));
+/// Runs `tasklist.exe`, trying the plain name first and falling back to its fixed path under
+/// the WSL mount's `Windows\System32` if that spawn fails (e.g. `appendWindowsPath = false`).
+fn take_tasklist_snapshot(name: &str, wsl_mount_root: &Path) -> Snapshot {
+    let args = tasklist_args(name);
+    let mut spawn_error = String::new();
+    for candidate in crate::env::windows_tool_candidates("tasklist.exe", wsl_mount_root) {
+        match std::process::Command::new(&candidate).args(&args).output() {
+            Ok(output) if output.status.success() => {
+                return Ok(parse_tasklist_csv(&String::from_utf8_lossy(&output.stdout)));
+            }
+            Ok(output) => return Err(format!("tasklist.exe failed ({})", output.status)),
+            Err(e) => spawn_error = format!("could not run {}: {e}", candidate.display()),
+        }
     }
-    Ok(parse_tasklist_csv(&String::from_utf8_lossy(&output.stdout)))
+    Err(format!(
+        "could not run tasklist.exe for Windows session status: {spawn_error}"
+    ))
 }
 
 /// pid → image name from `tasklist /FO CSV /NH` output.
@@ -294,10 +331,27 @@ mod tests {
 
     static LAZY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static LAZY_LAST_NAME: Mutex<String> = Mutex::new(String::new());
-    fn lazy_snapshotter(name: &str) -> Snapshot {
+    fn lazy_snapshotter(name: &str, _root: &Path) -> Snapshot {
         LAZY_CALLS.fetch_add(1, Ordering::SeqCst);
         *LAZY_LAST_NAME.lock().unwrap() = name.to_string();
         Ok(HashMap::from([(58892, "claude.exe".to_string())]))
+    }
+
+    static ROOT_SEEN: Mutex<String> = Mutex::new(String::new());
+    fn root_capturing_snapshotter(_name: &str, root: &Path) -> Snapshot {
+        *ROOT_SEEN.lock().unwrap() = root.display().to_string();
+        Ok(HashMap::new())
+    }
+
+    #[test]
+    fn probe_threads_the_hosts_wsl_mount_root_to_the_snapshotter() {
+        let probe = ProcessProbe::with_windows_snapshotter_and_root(
+            ubuntu(),
+            root_capturing_snapshotter,
+            PathBuf::from("/custom-root/"),
+        );
+        probe.is_running(PidDomain::Windows, 1, "claude");
+        assert_eq!(*ROOT_SEEN.lock().unwrap(), "/custom-root/");
     }
 
     #[test]
@@ -313,7 +367,7 @@ mod tests {
     }
 
     static PANIC_CALLS: AtomicUsize = AtomicUsize::new(0);
-    fn panicking_snapshotter(_name: &str) -> Snapshot {
+    fn panicking_snapshotter(_name: &str, _root: &Path) -> Snapshot {
         PANIC_CALLS.fetch_add(1, Ordering::SeqCst);
         panic!("simulated tasklist.exe panic");
     }

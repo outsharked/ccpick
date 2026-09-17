@@ -19,8 +19,13 @@ Or build from source with a Rust toolchain:
 cargo install --git https://github.com/outsharked/ccpick
 ```
 
-Native Windows isn't supported; use it inside WSL. Running-session detection needs Linux
-(`/proc`), so on macOS sessions are listed and resumable but never shown as running.
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/outsharked/ccpick/releases/latest/download/ccpick-installer.ps1 | iex"
+```
+
+On macOS, sessions are listed and resumable but never shown as running.
 
 ## Use
 
@@ -60,6 +65,23 @@ Discovered in order (earlier wins as the default launcher):
 Sources whose `projects/` resolve to the same directory share one transcript store, so each
 session is listed once and can be resumed through any of them.
 
+## Windows and WSL
+
+On a Windows machine with WSL, ccpick also lists the other side's sessions:
+
+- In WSL, Windows users' Claude Code data under `/mnt/c/Users/<user>` appears as `win:<name>` sources.
+- On Windows, sessions in *running* WSL distros appear as `wsl:<name>` (or `<distro>:<name>` with several distros). Stopped distros aren't started.
+
+Those sessions are searchable like any other. Pressing Enter on one opens a dialog with the command to paste into a shell on the other side (`c` copies it).
+
+```toml
+[environments]
+auto = true                # set false to only scan the native environment
+wsl_distros = ["Ubuntu"]   # Windows only: also scan these distros when stopped (boots them)
+```
+
+A `[[source]]` may point at the other side's path; its environment is inferred, or set `env = "windows"` / `env = "wsl:<distro>"`.
+
 ## Config
 
 `~/.config/ccpick/config.toml` (optional):
@@ -86,12 +108,17 @@ mise dev                      # run the TUI from source
 mise dev -- --list docker     # args after -- pass through to ccpick
 mise check                    # fmt check, clippy (warnings as errors), tests
 mise test                     # tests only
+mise test-windows             # WSL only: run the test suite as Windows binaries via interop
+mise lint-windows             # WSL only: clippy for the Windows target
 mise format                   # format
 mise install-bin              # install the release binary to ~/.cargo/bin
 ```
 
 Run the TUI from a plain shell rather than inside a Claude Code session, since resuming
 a session replaces the ccpick process.
+
+`mise test-windows` and `mise lint-windows` only work in WSL, with the mingw toolchain and
+`rustup target add x86_64-pc-windows-gnu` installed.
 
 ### Releasing
 

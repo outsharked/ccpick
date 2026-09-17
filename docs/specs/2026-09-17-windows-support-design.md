@@ -168,9 +168,10 @@ Enter on a non-running session whose launch source is not launchable opens a cen
   is still shown.
 - `Ctrl-A` cycles the session's sources and regenerates the command. `Esc` closes. Other keys are
   ignored while the dialog is open.
-- `c` copies: WSL host → `clip.exe` (text passed as UTF-16LE); Windows host → Win32 clipboard API;
-  Linux → `wl-copy`, else `xclip -selection clipboard`, else `xsel -b`; macOS → `pbcopy`;
-  if none succeed → OSC 52 escape sequence. The footer shows `copied` or the failure.
+- `c` copies: WSL host → `clip.exe` (text passed as UTF-16LE); Windows host → `clip.exe`
+  (UTF-16LE); Linux → `wl-copy`, else `xclip -selection clipboard`, else `xsel -b`;
+  macOS → `pbcopy`; if none succeed → OSC 52 escape sequence. The footer shows `copied` or the
+  failure.
 
 ### Command formatting (shared, from the neutral `LaunchPlan` + target `Env`)
 

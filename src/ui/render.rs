@@ -114,10 +114,13 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
         )));
     }
     lines.push(Line::from(""));
-    lines.push(match &dialog.note {
-        Some(note) => Line::from(Span::styled(note.clone(), Style::new().fg(Color::Yellow))),
-        None => Line::from(" c copy   ^A source   esc close").dim(),
-    });
+    if let Some(note) = &dialog.note {
+        lines.push(Line::from(Span::styled(
+            note.clone(),
+            Style::new().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from(" c copy   ^A source   esc close").dim());
     let inner_width = width.saturating_sub(4).max(1);
     let content_height = Paragraph::new(lines.clone())
         .wrap(Wrap { trim: false })
@@ -745,6 +748,25 @@ mod tests {
         assert!(text.contains("Set-Location"));
         assert!(text.contains("no longer exists"));
         assert!(text.contains("c copy"));
+    }
+
+    #[test]
+    fn dialog_note_keeps_the_hint_visible_on_its_own_line_above_it() {
+        let mut app = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
+        app.selected = 1;
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        app.set_copy_result(Ok("clip.exe"));
+        let text: String = draw_to(&mut app, 100, 30)
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("copied (clip.exe)"));
+        assert!(text.contains("c copy"));
+        assert!(text.contains("esc close"));
     }
 
     #[test]

@@ -5,6 +5,18 @@ use crate::model::LaunchSpec;
 use crate::search;
 use std::collections::HashSet;
 use std::fmt::Write;
+use std::path::Path;
+
+/// A path for display only: strips the verbatim-UNC prefix (`\\?\UNC\x` → `\\x`) that
+/// `dunce::canonicalize` leaves on UNC paths (e.g. a WSL source seen from a Windows host), so
+/// reports show the ordinary UNC form. Internal path handling keeps the canonical form as-is.
+fn display_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    match s.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s,
+    }
+}
 
 pub fn describe_launch(spec: &LaunchSpec) -> String {
     let mut parts: Vec<String> = spec.env_remove.iter().map(|k| format!("-u {k}")).collect();
@@ -21,7 +33,7 @@ pub fn sources_report(catalog: &Catalog) -> String {
             .stores
             .iter()
             .find(|s| s.sources.contains(&si))
-            .map(|s| s.path.display().to_string())
+            .map(|s| display_path(&s.path))
             .unwrap_or_else(|| "-".into());
         let _ = writeln!(
             out,
@@ -29,7 +41,7 @@ pub fn sources_report(catalog: &Catalog) -> String {
             source.agent,
             source.name,
             source.env.id(),
-            source.config_dir.display(),
+            display_path(&source.config_dir),
             store,
             describe_launch(&source.launch)
         );
@@ -80,6 +92,20 @@ mod tests {
     use super::*;
     use crate::catalog::fake_catalog;
     use crate::model::LaunchSpec;
+
+    #[test]
+    fn display_path_strips_verbatim_unc_prefix_only_in_reports() {
+        assert_eq!(
+            display_path(std::path::Path::new(
+                r"\\?\UNC\wsl.localhost\Ubuntu\home\me"
+            )),
+            r"\\wsl.localhost\Ubuntu\home\me"
+        );
+        assert_eq!(
+            display_path(std::path::Path::new("/plain/unix/path")),
+            "/plain/unix/path"
+        );
+    }
 
     #[test]
     fn describes_launch_specs() {

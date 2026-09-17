@@ -247,9 +247,15 @@ pub fn linux_to_unc(path: &str, distro: &str) -> Option<PathBuf> {
 }
 
 /// `\\wsl.localhost\<distro>\home\me` or `\\wsl$\<distro>\home\me` (either slash style,
-/// any case) → (distro, `/home/me`).
+/// any case), or the verbatim UNC form `\\?\UNC\wsl.localhost\...` / `\\?\UNC\wsl$\...` that
+/// `dunce::canonicalize` leaves on UNC paths → (distro, `/home/me`).
 pub fn unc_to_linux(path: &str) -> Option<(String, String)> {
-    let norm = path.replace('/', "\\");
+    let mut norm = path.replace('/', "\\");
+    if let Some(prefix) = norm.get(..8)
+        && prefix.eq_ignore_ascii_case(r"\\?\UNC\")
+    {
+        norm = format!(r"\\{}", &norm[8..]);
+    }
     let lower = norm.to_ascii_lowercase();
     let prefix_len = if lower.starts_with(r"\\wsl.localhost\") {
         r"\\wsl.localhost\".len()
@@ -416,6 +422,24 @@ mod tests {
     }
 
     #[test]
+    fn unc_to_linux_accepts_the_verbatim_prefix_dunce_leaves_on_unc_paths() {
+        // dunce::canonicalize keeps `\\?\UNC\...` verbatim for UNC paths (unlike `\\?\C:\...`,
+        // which it simplifies), so a configured/discovered WSL source canonicalizes to this form.
+        assert_eq!(
+            unc_to_linux(r"\\?\UNC\wsl.localhost\Ubuntu\home\me"),
+            Some(("Ubuntu".into(), "/home/me".into()))
+        );
+        assert_eq!(
+            unc_to_linux(r"\\?\unc\wsl$\Debian\root"),
+            Some(("Debian".into(), "/root".into()))
+        );
+        assert_eq!(
+            unc_to_linux("//?/UNC/wsl.localhost/Ubuntu"),
+            Some(("Ubuntu".into(), "/".into()))
+        );
+    }
+
+    #[test]
     fn host_context_maps_between_environments() {
         let wsl = wsl_host();
         assert_eq!(
@@ -462,6 +486,17 @@ mod tests {
         assert_eq!(
             win.infer_env(Path::new(r"C:\Users\me\.claude")),
             Env::Windows
+        );
+        assert_eq!(
+            win.to_env(
+                Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\me\.claude"),
+                &ubuntu
+            ),
+            PathBuf::from("/home/me/.claude")
+        );
+        assert_eq!(
+            win.infer_env(Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\me\.claude")),
+            ubuntu
         );
     }
 }

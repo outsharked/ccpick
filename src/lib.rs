@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod catalog;
 pub mod config;
+pub mod env;
 pub mod format;
 pub mod launch;
 pub mod model;

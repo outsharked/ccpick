@@ -7,9 +7,20 @@ right launcher.
 
 ## Install
 
+Linux (x86_64, arm64) and macOS (Intel, Apple Silicon):
+
 ```bash
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/outsharked/ccpick/releases/latest/download/ccpick-installer.sh | sh
 ```
+
+Or build from source with a Rust toolchain:
+
+```bash
+cargo install --git https://github.com/outsharked/ccpick
+```
+
+Native Windows isn't supported; use it inside WSL. Running-session detection needs Linux
+(`/proc`), so on macOS sessions are listed and resumable but never shown as running.
 
 ## Use
 
@@ -82,7 +93,18 @@ mise install-bin              # install the release binary to ~/.cargo/bin
 Run the TUI from a plain shell rather than inside a Claude Code session, since resuming
 a session replaces the ccpick process.
 
+### Releasing
+
+```bash
+mise release 0.2.0         # bump version, run checks, commit, tag v0.2.0
+git push --follow-tags     # CI builds binaries and publishes the GitHub release + installer
+```
+
 ## Design
 
 See `docs/superpowers/specs/2026-09-16-ccpick-design.md`. Agent-specific code lives behind a
 `Provider` trait in `src/providers/`, so other agents (e.g. Codex CLI) can be added later.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

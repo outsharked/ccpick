@@ -30,7 +30,7 @@ Rust, single binary. Crates: `ratatui` + `crossterm` (TUI), `nucleo-matcher` (fu
 `serde`/`serde_json`/`serde_yaml`/`toml` (parsing), `memchr` (substring search), `rayon` (parallel
 scan), `clap` (CLI), `dirs` (paths), `chrono` (timestamps). Linux-first: liveness via `/proc`, launch via
 `std::os::unix::process::CommandExt::exec`. Repo: `~/code/ccpick`,
-`github.com/jamietre/ccpick`.
+`github.com/outsharked/ccpick`.
 
 ## Agent providers
 

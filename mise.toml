@@ -1,4 +1,5 @@
 [tools]
+"github:axodotdev/cargo-dist" = "0.33.0"
 rust = "stable"
 
 [tasks.dev]
@@ -32,3 +33,26 @@ run = "cargo build --release"
 [tasks.install-bin]
 description = "Install the release binary to ~/.cargo/bin"
 run = "cargo install --path ."
+
+[tasks.release]
+description = "Bump the version, run checks, commit and tag (then: git push --follow-tags)"
+usage = 'arg "<version>" help="New version without the v, e.g. 0.2.0"'
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+version="${usage_version#v}"
+if [ -n "$(git status --porcelain)" ]; then
+  echo "working tree not clean" >&2
+  exit 1
+fi
+if [ "$(git branch --show-current)" != "main" ]; then
+  echo "releases are cut from main" >&2
+  exit 1
+fi
+sed -i.bak "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml && rm Cargo.toml.bak
+cargo check --quiet
+mise run check
+git commit -am "Release v$version"
+git tag -a "v$version" -m "v$version"
+echo "Tagged v$version. Push to publish the release: git push --follow-tags"
+'''

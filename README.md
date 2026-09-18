@@ -75,12 +75,16 @@ On a Windows machine with WSL, ccpick also lists the other side's sessions:
 Those sessions are searchable like any other. Pressing Enter on one opens a dialog with the command to paste into a shell on the other side (`c` copies it).
 
 Pressing Enter on a session that is *running* brings its terminal to the front instead of
-resuming it: ccpick finds the window hosting that session and, when the terminal shows session
-titles on its tabs (as Windows Terminal does), switches to the matching tab. It takes a second or
-two, since the work happens through PowerShell. If the tab can't be identified — no matching
-title, or two sessions with the same one — the window is raised without changing tabs, and if no
-window is found at all the status line just reports that the session is running. Focusing a WSL
-session's terminal from a Windows-hosted ccpick isn't supported.
+resuming it, switching to the right tab where the terminal supports tabs (Windows Terminal does).
+It takes a second or two, since the work runs through PowerShell.
+
+- **Windows sessions** are found through their console: ccpick briefly sets the console title to
+  a unique marker, selects the tab showing it, then restores the previous title.
+- **WSL sessions** are found through the session's own interop socket, and the tab is matched by
+  title — so if the terminal's title has drifted from the one ccpick shows, the window is raised
+  without switching tabs.
+- If no terminal can be found, the status line reports that the session is running, with the
+  reason. Focusing a WSL session's terminal from a Windows-hosted ccpick isn't supported.
 
 ```toml
 [environments]

@@ -10,6 +10,11 @@ pub struct Req<'a> {
     pub query: &'a str,
     pub token: Option<&'a str>,
     pub origin: Option<&'a str>,
+    /// The request's `Host` header, if any. Checked against a loopback allowlist: a standard
+    /// defence against DNS rebinding, where an attacker's page (loaded from a public hostname
+    /// that later resolves to 127.0.0.1) is same-origin as far as the browser is concerned and
+    /// so sends no `Origin` header at all — the origin check alone does nothing against that.
+    pub host: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -17,6 +22,7 @@ pub struct Res {
     pub status: u16,
     pub content_type: String,
     pub body: Vec<u8>,
+    pub headers: Vec<(String, String)>,
 }
 
 impl Res {
@@ -25,6 +31,7 @@ impl Res {
             status,
             content_type: "application/json; charset=utf-8".into(),
             body: serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec()),
+            headers: Vec::new(),
         }
     }
 
@@ -37,6 +44,7 @@ impl Res {
             status,
             content_type: content_type.into(),
             body: body.as_bytes().to_vec(),
+            headers: Vec::new(),
         }
     }
 }
@@ -73,40 +81,93 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The hostname part of a `Host` header, with any `:<port>` suffix stripped. Kept deliberately
+/// simple (this server never binds anything but IPv4 loopback, so no IPv6 literal form to
+/// parse): a trailing `:<digits>` is a port, anything else is left as-is.
+fn hostname(host: &str) -> &str {
+    match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    }
+}
+
+/// Whether `actual` is the page's own origin, allowing either loopback hostname on whatever
+/// port `expected` (as recorded by `Portal::set_origin`) was bound to.
+fn origin_matches(expected: &str, actual: &str) -> bool {
+    match expected.rsplit_once(':') {
+        Some((_, port)) => {
+            actual == format!("http://127.0.0.1:{port}")
+                || actual == format!("http://localhost:{port}")
+        }
+        None => false,
+    }
+}
+
 pub fn route(req: &Req, portal: &Portal) -> Res {
+    // Refused before anything else, regardless of path: a DNS-rebinding attacker's page can
+    // reach this server carrying a `Host` header for its own public hostname, and the browser
+    // treats that as same-origin (no `Origin` header at all), so this is the only check that
+    // catches it.
+    if let Some(host) = req.host {
+        let name = hostname(host);
+        if name != "127.0.0.1" && name != "localhost" {
+            return Res::error(403, "unrecognized Host header");
+        }
+    }
     // The page itself carries no token: the token arrives in its URL and the script it loads
     // sends it on every call after that.
     if req.path == "/" && req.method == "GET" {
-        return Res::text(200, "text/html; charset=utf-8", crate::web::PAGE);
+        let mut res = Res::text(200, "text/html; charset=utf-8", crate::web::PAGE);
+        // The token lives in this page's own URL. Without this, any external subresource or
+        // outbound link a later task adds would leak it via the Referer header.
+        res.headers
+            .push(("Referrer-Policy".into(), "no-referrer".into()));
+        return res;
     }
     // A page on another origin must not be able to reach a server that can spawn processes,
     // even if it somehow learned the token. Checked before the token so a foreign origin is
-    // refused outright rather than treated as merely unauthenticated.
+    // refused outright rather than treated as merely unauthenticated. Compared against the
+    // page's own recorded origin rather than blanket-rejected, since a browser sends `Origin`
+    // on the page's own same-origin POSTs too, not only on genuinely cross-origin requests; if
+    // no origin has been recorded yet, fail closed and refuse any non-empty `Origin`.
     if let Some(origin) = req.origin
         && !origin.is_empty()
+        && !portal
+            .origin()
+            .is_some_and(|expected| origin_matches(expected, origin))
     {
         return Res::error(403, "cross-origin requests are refused");
     }
     if req.token != Some(portal.token()) {
         return Res::error(401, "missing or invalid token");
     }
-    // Bound once here and worked from as an `Arc`: `Portal::catalog()` releases its lock guard
-    // immediately, so nothing below ever holds one across handler work.
-    let catalog = portal.catalog();
+    // Bound once here and worked from as an `Arc`, together with the generation it was
+    // published under: reading them as one pair (rather than two separate lock acquisitions)
+    // means a publish landing in between can never pair a catalog with the wrong generation.
+    let (catalog, generation) = portal.published();
     match (req.method, req.path) {
         ("GET", "/api/sessions") => Res::json(
             200,
-            sessions_payload(&catalog, portal.generation(), crate::format::now_ms()),
+            sessions_payload(&catalog, generation, crate::format::now_ms()),
         ),
         ("GET", "/api/search") => {
             let query = query_param(req.query, "q").unwrap_or_default();
             let all: Vec<usize> = (0..catalog.sessions.len()).collect();
             let matches = crate::search::fuzzy(&catalog, &all, &query);
-            let hits: Vec<Value> = crate::search::full_text(&catalog, &all, &query, None)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|hit| json!({ "index": hit.session, "snippet": hit.snippet }))
-                .collect();
+            // A newer search supersedes an older one still scanning: full_text checks this
+            // ticket against the shared counter as it goes, so a search box wired per keystroke
+            // can't pile up uncancellable scans across rayon's pool.
+            let mine = portal.next_search();
+            let hits: Vec<Value> = crate::search::full_text(
+                &catalog,
+                &all,
+                &query,
+                Some((portal.search_generation(), mine)),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hit| json!({ "index": hit.session, "snippet": hit.snippet }))
+            .collect();
             Res::json(200, json!({ "matches": matches, "hits": hits }))
         }
         ("GET", "/api/messages") => match query_param(req.query, "index") {
@@ -138,6 +199,7 @@ mod tests {
             query,
             token: Some("secret"),
             origin: None,
+            host: None,
             body: b"",
         }
     }
@@ -146,7 +208,14 @@ mod tests {
     fn a_request_without_the_token_is_refused() {
         let mut req = get("/api/sessions", "");
         req.token = None;
-        assert_eq!(route(&req, &portal()).status, 401);
+        let res = route(&req, &portal());
+        assert_eq!(res.status, 401);
+        // Proves a refusal, not merely a status code stamped on a payload that was built
+        // anyway: no catalog data rides along with the error.
+        let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+        assert!(value["error"].is_string());
+        assert!(value["sessions"].is_null());
+
         req.token = Some("wrong");
         assert_eq!(route(&req, &portal()).status, 401);
     }
@@ -155,7 +224,62 @@ mod tests {
     fn a_request_from_another_origin_is_refused_even_with_the_token() {
         let mut req = get("/api/sessions", "");
         req.origin = Some("https://evil.example");
+        let res = route(&req, &portal());
+        assert_eq!(res.status, 403);
+        let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+        assert!(value["error"].is_string());
+        assert!(value["sessions"].is_null());
+    }
+
+    #[test]
+    fn a_request_matching_the_recorded_origin_is_accepted() {
+        let portal = portal();
+        portal.set_origin("http://127.0.0.1:4242".into());
+        let mut req = get("/api/sessions", "");
+        req.origin = Some("http://127.0.0.1:4242");
+        assert_eq!(route(&req, &portal).status, 200);
+        // The other loopback hostname, same port, is also the page's own origin.
+        req.origin = Some("http://localhost:4242");
+        assert_eq!(route(&req, &portal).status, 200);
+    }
+
+    #[test]
+    fn a_foreign_origin_is_refused_even_once_one_is_recorded() {
+        let portal = portal();
+        portal.set_origin("http://127.0.0.1:4242".into());
+        let mut req = get("/api/sessions", "");
+        req.origin = Some("https://evil.example");
+        assert_eq!(route(&req, &portal).status, 403);
+    }
+
+    #[test]
+    fn an_origin_is_refused_when_none_has_been_recorded_yet() {
+        let mut req = get("/api/sessions", "");
+        req.origin = Some("http://127.0.0.1:4242");
         assert_eq!(route(&req, &portal()).status, 403);
+    }
+
+    #[test]
+    fn a_foreign_host_header_is_refused() {
+        let mut req = get("/api/sessions", "");
+        req.host = Some("evil.example");
+        assert_eq!(route(&req, &portal()).status, 403);
+    }
+
+    #[test]
+    fn a_loopback_host_header_with_a_port_is_accepted() {
+        let mut req = get("/api/sessions", "");
+        req.host = Some("127.0.0.1:4242");
+        assert_eq!(route(&req, &portal()).status, 200);
+        req.host = Some("localhost:4242");
+        assert_eq!(route(&req, &portal()).status, 200);
+    }
+
+    #[test]
+    fn a_post_to_a_get_only_path_is_not_found() {
+        let mut req = get("/api/sessions", "");
+        req.method = "POST";
+        assert_eq!(route(&req, &portal()).status, 404);
     }
 
     #[test]
@@ -166,11 +290,31 @@ mod tests {
             query: "",
             token: None,
             origin: None,
+            host: None,
             body: b"",
         };
         let res = route(&req, &portal());
         assert_eq!(res.status, 200);
         assert!(res.content_type.starts_with("text/html"));
+    }
+
+    #[test]
+    fn the_page_response_tells_the_browser_never_to_leak_the_token_via_referer() {
+        let req = Req {
+            method: "GET",
+            path: "/",
+            query: "",
+            token: None,
+            origin: None,
+            host: None,
+            body: b"",
+        };
+        let res = route(&req, &portal());
+        assert!(
+            res.headers
+                .iter()
+                .any(|(k, v)| k == "Referrer-Policy" && v == "no-referrer")
+        );
     }
 
     #[test]
@@ -202,11 +346,67 @@ mod tests {
     }
 
     #[test]
+    fn a_superseded_search_is_reported_as_having_no_hits() {
+        use std::sync::atomic::AtomicBool;
+
+        // A candidate set large enough that the full-text scan takes measurable wall-clock
+        // time, so a concurrent burst of newer search tickets is (for all practical purposes)
+        // certain to land mid-scan and cancel it -- proving the /api/search handler actually
+        // wires `next_search()`/`search_generation()` into `full_text`'s `cancel` parameter,
+        // not just that `full_text` itself honours one (search::tests already covers that).
+        let mut p = crate::providers::fake::FakeProvider::default();
+        p.add_source("one", "/s");
+        for i in 0..400 {
+            p.add_session(
+                "/s",
+                &format!("s{i}"),
+                &format!("Session {i}"),
+                1000 + i as i64,
+                1000 + i as i64,
+                &[(
+                    crate::model::Role::User,
+                    "notes for this session, nothing unusual about it",
+                )],
+            );
+        }
+        let portal = Portal::new(crate::catalog::build_fake(p), "secret".into());
+
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    portal.next_search();
+                }
+            });
+            let res = route(&get("/api/search", "q=session"), &portal);
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+            assert!(
+                !value["matches"].as_array().unwrap().is_empty(),
+                "the cheap fuzzy pass must not be cancelled"
+            );
+            assert!(
+                value["hits"].as_array().unwrap().is_empty(),
+                "a superseded full-text scan must report no hits, not complete"
+            );
+        });
+    }
+
+    #[test]
     fn messages_are_served_for_a_session_index() {
+        // Index 0 is "Docker build cache" (fake_catalog sorts by last_ts descending), whose
+        // fixture messages are a known user/assistant pair — pin their content, not just that
+        // `messages` happens to be an array, which `{"messages":[]}` would also satisfy.
         let res = route(&get("/api/messages", "index=0"), &portal());
         assert_eq!(res.status, 200);
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
-        assert!(value["messages"].is_array());
+        let messages = value["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["text"], "fix docker");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["text"], "done");
     }
 
     #[test]

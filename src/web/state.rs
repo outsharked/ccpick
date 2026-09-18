@@ -2,9 +2,9 @@
 //! when a viewer would see a difference, and the subscribers to notify when it does.
 use crate::catalog::Catalog;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 /// Everything a viewer can see, hashed. Two catalogs with the same fingerprint would render
@@ -48,6 +48,12 @@ pub struct Portal {
     published: RwLock<Published>,
     subscribers: Mutex<Vec<Sender<u64>>>,
     token: String,
+    /// Ticket counter for in-flight full-text searches: `next_search()` mints a new one and
+    /// `full_text`'s `cancel` parameter watches it, so a newer request aborts an older scan.
+    search_generation: AtomicU64,
+    /// The page's own origin (`http://127.0.0.1:<port>`, say), recorded once the server knows
+    /// what port it bound. Unset until then, in which case the origin check fails closed.
+    origin: OnceLock<String>,
 }
 
 impl Portal {
@@ -61,6 +67,8 @@ impl Portal {
             }),
             subscribers: Mutex::new(Vec::new()),
             token,
+            search_generation: AtomicU64::new(0),
+            origin: OnceLock::new(),
         }
     }
 
@@ -72,8 +80,39 @@ impl Portal {
         self.published.read().unwrap().generation
     }
 
+    /// The catalog and the generation it was published with, read under a single lock: taking
+    /// `catalog()` and `generation()` separately would let a publish land between the two reads,
+    /// pairing an old catalog with a newer generation number (or vice versa) and leaving a
+    /// client believing a stale view is current.
+    pub fn published(&self) -> (Arc<Catalog>, u64) {
+        let guard = self.published.read().unwrap();
+        (guard.catalog.clone(), guard.generation)
+    }
+
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// Mints a new search ticket, superseding whatever ticket was current. Pass the returned
+    /// value alongside `search_generation()` to `search::full_text`'s `cancel` parameter.
+    pub fn next_search(&self) -> u64 {
+        self.search_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The counter `next_search()` mints tickets from, for `search::full_text` to watch.
+    pub fn search_generation(&self) -> &AtomicU64 {
+        &self.search_generation
+    }
+
+    /// Records the page's own origin, once the server knows what port it bound. A second call
+    /// is ignored: the origin cannot change for the life of one run.
+    pub fn set_origin(&self, origin: String) {
+        let _ = self.origin.set(origin);
+    }
+
+    /// The recorded origin, if the server has set one yet.
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.get().map(String::as_str)
     }
 
     /// A receiver that yields the new generation each time one is published.
@@ -268,6 +307,43 @@ mod tests {
     fn token_returns_what_it_was_constructed_with() {
         let portal = Portal::new(fake_catalog(), "secret-token".into());
         assert_eq!(portal.token(), "secret-token");
+    }
+
+    #[test]
+    fn published_pairs_the_catalog_with_the_generation_it_was_published_at() {
+        let portal = Portal::new(fake_catalog(), "token".into());
+        let (catalog, generation) = portal.published();
+        assert_eq!(generation, 0);
+        assert_eq!(catalog.sessions[0].meta.title, "Docker build cache");
+
+        let mut changed = fake_catalog();
+        changed.sessions[0].meta.title = "Renamed".into();
+        assert!(portal.publish(changed));
+        let (catalog, generation) = portal.published();
+        assert_eq!(generation, 1);
+        assert_eq!(catalog.sessions[0].meta.title, "Renamed");
+    }
+
+    #[test]
+    fn next_search_mints_increasing_tickets_that_search_generation_reflects() {
+        let portal = Portal::new(fake_catalog(), "token".into());
+        assert_eq!(portal.next_search(), 1);
+        assert_eq!(portal.next_search(), 2);
+        assert_eq!(portal.search_generation().load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn set_origin_is_recorded_once_and_further_calls_are_ignored() {
+        let portal = Portal::new(fake_catalog(), "token".into());
+        assert_eq!(portal.origin(), None);
+        portal.set_origin("http://127.0.0.1:4242".into());
+        assert_eq!(portal.origin(), Some("http://127.0.0.1:4242"));
+        portal.set_origin("http://127.0.0.1:9999".into());
+        assert_eq!(
+            portal.origin(),
+            Some("http://127.0.0.1:4242"),
+            "the origin is fixed for the life of the run"
+        );
     }
 
     #[test]

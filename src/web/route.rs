@@ -179,8 +179,71 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
                 _ => Res::error(404, "no such session"),
             },
         },
+        ("POST", "/api/focus") => {
+            let Some(idx) = body_index(req.body) else {
+                return Res::error(400, "index is required");
+            };
+            let Some(session) = catalog.sessions.get(idx) else {
+                return Res::error(404, "no such session");
+            };
+            let Some((pid, source_idx)) = session.live else {
+                return Res::error(409, "that session isn't running");
+            };
+            let env = catalog.sources[source_idx].env.clone();
+            match crate::process::PidDomain::of(&env) {
+                None => Res::error(409, "no process model for this environment"),
+                Some(domain) => match crate::focus::focus_session(
+                    pid as u32,
+                    domain,
+                    &env,
+                    &catalog.host,
+                    Some(&session.meta.title),
+                ) {
+                    Ok(_) => Res::json(200, json!({ "ok": true })),
+                    Err(error) => Res::json(409, json!({ "error": error })),
+                },
+            }
+        }
+        ("POST", "/api/launch") => {
+            let Some(idx) = body_index(req.body) else {
+                return Res::error(400, "index is required");
+            };
+            let Some(session) = catalog.sessions.get(idx) else {
+                return Res::error(404, "no such session");
+            };
+            let source_idx = session.default_source;
+            let plan = catalog.launch_plan(idx, source_idx);
+            let env = catalog.sources[source_idx].env.clone();
+            // Anything ccpick can't open itself comes back with the line to paste, so the page
+            // always has something to offer.
+            let fallback = |error: String| {
+                Res::json(
+                    409,
+                    json!({
+                        "error": error,
+                        "command": crate::shell::resume_command(&plan, &env),
+                        "shell": env.shell_name(),
+                    }),
+                )
+            };
+            if !catalog.is_launchable(source_idx) {
+                return fallback("ccpick can't start this session from here".into());
+            }
+            match crate::launch::spawn_in_new_terminal(&plan, &env, &catalog.host) {
+                Ok(()) => Res::json(200, json!({ "ok": true })),
+                Err(error) => fallback(error),
+            }
+        }
         _ => Res::error(404, "not found"),
     }
+}
+
+pub fn body_index(body: &[u8]) -> Option<usize> {
+    serde_json::from_slice::<Value>(body)
+        .ok()?
+        .get("index")?
+        .as_u64()
+        .map(|n| n as usize)
 }
 
 #[cfg(test)]
@@ -202,6 +265,59 @@ mod tests {
             host: None,
             body: b"",
         }
+    }
+
+    fn post<'a>(path: &'a str, body: &'a [u8]) -> Req<'a> {
+        Req {
+            method: "POST",
+            path,
+            query: "",
+            token: Some("secret"),
+            origin: None,
+            host: None,
+            body,
+        }
+    }
+
+    #[test]
+    fn focusing_a_session_that_is_not_running_is_a_conflict_not_an_action() {
+        let res = route(&post("/api/focus", br#"{"index":0}"#), &portal());
+        assert_eq!(res.status, 409);
+    }
+
+    #[test]
+    fn launching_a_session_ccpick_cannot_reach_returns_the_command_to_paste() {
+        let portal = Portal::new(crate::catalog::fake_catalog_with_foreign(), "secret".into());
+        let catalog = portal.catalog();
+        let idx = catalog
+            .sessions
+            .iter()
+            .position(|s| s.meta.id == "w")
+            .unwrap();
+        let body = format!("{{\"index\":{idx}}}");
+        let res = route(&post("/api/launch", body.as_bytes()), &portal);
+        assert_eq!(res.status, 409);
+        let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+        assert!(value["command"].as_str().unwrap().contains("--resume"));
+    }
+
+    #[test]
+    fn a_malformed_body_is_a_400() {
+        assert_eq!(
+            route(&post("/api/launch", b"not json"), &portal()).status,
+            400
+        );
+        assert_eq!(
+            route(&post("/api/launch", br#"{"index":999}"#), &portal()).status,
+            404
+        );
+    }
+
+    #[test]
+    fn parses_the_index_out_of_a_body() {
+        assert_eq!(body_index(br#"{"index":12}"#), Some(12));
+        assert_eq!(body_index(br#"{"other":1}"#), None);
+        assert_eq!(body_index(b""), None);
     }
 
     #[test]

@@ -2,8 +2,10 @@
 //! when a viewer would see a difference, and the subscribers to notify when it does.
 use crate::catalog::Catalog;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 /// Everything a viewer can see, hashed. Two catalogs with the same fingerprint would render
 /// identically, so republishing one must not wake idle tabs.
@@ -104,10 +106,41 @@ impl Portal {
     }
 }
 
+/// Rebuilds the catalog every `every` until `stop` is set, publishing each result. Runs one
+/// rebuild before checking `stop`, so a caller can drive exactly one pass in a test.
+///
+/// A rebuild that fails is reported and skipped: the last good catalog keeps serving, because
+/// a transient failure (an unmounted drive, a distro shutting down) must not empty the page.
+/// The rebuild runs outside any `Portal` lock, so it can take as long as it needs without
+/// blocking readers.
+pub fn refresh_loop(
+    portal: Arc<Portal>,
+    every: Duration,
+    build: impl Fn() -> anyhow::Result<Catalog> + Send + 'static,
+    stop: Arc<AtomicBool>,
+) {
+    loop {
+        match build() {
+            Ok(catalog) => {
+                portal.publish(catalog);
+            }
+            Err(err) => eprintln!("ccpick: warning: could not refresh sessions: {err}"),
+        }
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        std::thread::sleep(every);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::catalog::fake_catalog;
+    use std::sync::atomic::AtomicU64;
 
     #[test]
     fn publishing_an_identical_catalog_does_not_advance_the_generation() {
@@ -207,5 +240,50 @@ mod tests {
     fn token_returns_what_it_was_constructed_with() {
         let portal = Portal::new(fake_catalog(), "secret-token".into());
         assert_eq!(portal.token(), "secret-token");
+    }
+
+    #[test]
+    fn the_refresh_loop_publishes_until_it_is_stopped() {
+        let portal = Arc::new(Portal::new(fake_catalog(), "token".into()));
+        let events = portal.subscribe();
+        let stop = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = calls.clone();
+        let handle = {
+            let portal = portal.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                refresh_loop(
+                    portal,
+                    Duration::from_millis(5),
+                    move || {
+                        let n = counter.fetch_add(1, Ordering::Relaxed);
+                        let mut catalog = fake_catalog();
+                        catalog.sessions[0].meta.title = format!("Build {n}");
+                        Ok(catalog)
+                    },
+                    stop,
+                )
+            })
+        };
+        assert_eq!(events.recv().unwrap(), 1);
+        assert_eq!(events.recv().unwrap(), 2);
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        assert!(calls.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[test]
+    fn a_failing_rebuild_leaves_the_last_good_catalog_in_place() {
+        let portal = Arc::new(Portal::new(fake_catalog(), "token".into()));
+        let stop = Arc::new(AtomicBool::new(true));
+        refresh_loop(
+            portal.clone(),
+            Duration::from_millis(1),
+            || anyhow::bail!("disk went away"),
+            stop,
+        );
+        assert_eq!(portal.generation(), 0);
+        assert!(!portal.catalog().sessions.is_empty());
     }
 }

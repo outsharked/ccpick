@@ -36,6 +36,8 @@ impl PidDomain {
 type Snapshot = Result<HashMap<u32, String>, String>;
 /// Pids inside one WSL distro whose command line contains the probed name.
 type ProcSnapshot = Result<HashSet<u32>, String>;
+/// (pid, open file path) pairs for processes whose command line contains the probed name.
+type OpenFiles = Vec<(u32, PathBuf)>;
 
 /// Answers liveness questions for one ccpick run. The Windows snapshot (WSL hosts) is taken at
 /// most once, lazily, the first time a Windows-domain pid is actually probed — filtered by the
@@ -55,6 +57,11 @@ pub struct ProcessProbe {
     /// How to take a distro's snapshot and list running distros; swappable in tests.
     distro_snapshotter: fn(&str, &str, &Path) -> ProcSnapshot,
     distro_lister: fn(&Path) -> Result<Vec<String>, String>,
+    /// This host's own open-file listing, filtered by process name; taken at most once, like
+    /// the Windows snapshot above. Empty on a host with no `/proc` to walk.
+    open_files: OnceLock<OpenFiles>,
+    /// How to list (pid, open file) pairs on this host; swappable in tests.
+    open_file_lister: fn(&str) -> OpenFiles,
 }
 
 impl ProcessProbe {
@@ -68,6 +75,8 @@ impl ProcessProbe {
             running: OnceLock::new(),
             distro_snapshotter: take_wsl_proc_snapshot,
             distro_lister: take_running_distros,
+            open_files: OnceLock::new(),
+            open_file_lister: linux_open_files,
         }
     }
 
@@ -105,6 +114,16 @@ impl ProcessProbe {
         ProcessProbe {
             wsl_mount_root,
             snapshotter,
+            ..ProcessProbe::new(host)
+        }
+    }
+
+    /// A probe whose open-file listing comes from a test double, so no test walks the real
+    /// `/proc`.
+    #[cfg(test)]
+    pub fn with_open_file_lister(host: Env, lister: fn(&str) -> OpenFiles) -> ProcessProbe {
+        ProcessProbe {
+            open_file_lister: lister,
             ..ProcessProbe::new(host)
         }
     }
@@ -214,6 +233,25 @@ impl ProcessProbe {
         }
     }
 
+    /// Every (pid, open file) pair for this host's own processes whose command line contains
+    /// `process_name`. This is agent-neutral: it says nothing about what the files mean — a
+    /// caller (e.g. the Codex provider) maps them back to whatever it recognises.
+    ///
+    /// Linux and WSL only, and only this host's own `/proc` — there is no cross-distro or
+    /// cross-machine handle enumeration here, unlike the Windows-snapshot machinery above.
+    /// Windows-native has no `/proc`; enumerating its handles is out of scope, so the answer
+    /// there is always empty, the way macOS already has no liveness signal for Claude. Taken at
+    /// most once per probe, so a caller re-checking many sessions doesn't walk `/proc` per
+    /// session.
+    pub fn open_files(&self, process_name: &str) -> Vec<(u32, PathBuf)> {
+        if !matches!(self.host, Env::Linux | Env::Wsl { .. }) {
+            return Vec::new();
+        }
+        self.open_files
+            .get_or_init(|| (self.open_file_lister)(process_name))
+            .clone()
+    }
+
     /// Problems hit while probing (e.g. `tasklist.exe` unavailable).
     pub fn warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
@@ -250,6 +288,42 @@ fn linux_cmdline_contains(pid: u32, name: &str) -> bool {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| bytes.windows(name.len()).any(|w| w == name.as_bytes()))
         .unwrap_or(false)
+}
+
+/// This host's own `/proc`: every (pid, open file target) pair for a pid whose command line
+/// contains `name`, established empirically against a live `codex` process — it holds its
+/// rollout file open for as long as it runs, and `/proc/<pid>/fd/*` symlinks resolve to it.
+/// A pid or fd that can't be read (permission denied, exited mid-walk) is skipped rather than
+/// failing the whole scan: another user's processes are not ours to inspect, and that is not an
+/// error, just nothing to report for that pid.
+#[cfg(target_os = "linux")]
+fn linux_open_files(name: &str) -> Vec<(u32, PathBuf)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if !linux_cmdline_contains(pid, name) {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path()) {
+                found.push((pid, target));
+            }
+        }
+    }
+    found
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_open_files(_name: &str) -> Vec<(u32, PathBuf)> {
+    Vec::new()
 }
 
 #[cfg(windows)]
@@ -710,6 +784,38 @@ mod tests {
     fn panicking_snapshotter(_name: &str, _root: &Path) -> Snapshot {
         PANIC_CALLS.fetch_add(1, Ordering::SeqCst);
         panic!("simulated tasklist.exe panic");
+    }
+
+    #[test]
+    fn open_files_pairs_each_pid_with_what_it_has_open() {
+        let probe = ProcessProbe::with_open_file_lister(Env::Linux, |_name| {
+            vec![
+                (
+                    42,
+                    PathBuf::from("/home/me/.codex/sessions/2026/09/18/rollout-a.jsonl"),
+                ),
+                (42, PathBuf::from("/home/me/.codex/state_5.sqlite")),
+                (
+                    7,
+                    PathBuf::from("/home/me/.codex/sessions/2026/09/18/rollout-b.jsonl"),
+                ),
+            ]
+        });
+        let open = probe.open_files("codex");
+        assert_eq!(open.len(), 3);
+        assert!(
+            open.iter()
+                .any(|(pid, p)| *pid == 7 && p.ends_with("rollout-b.jsonl"))
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_proc_filesystem_reports_nothing() {
+        let probe = ProcessProbe::new(Env::Windows);
+        assert!(
+            probe.open_files("codex").is_empty(),
+            "no handle enumeration on Windows yet"
+        );
     }
 
     #[test]

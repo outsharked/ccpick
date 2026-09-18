@@ -1,4 +1,5 @@
 pub mod db;
+pub mod live;
 pub mod rollout;
 pub mod sources;
 
@@ -117,12 +118,17 @@ impl Provider for CodexProvider {
     fn may_contain(&self, path: &Path, needle_lower: &str) -> bool {
         rollout::may_contain(path, needle_lower)
     }
+    /// A thread from any known store counts here: rollout paths are absolute and store-unique,
+    /// so matching a store's threads against the wider open-file list can't cross-contaminate
+    /// another source's sessions the way filtering by `_source` would need to guard against.
     fn launch_records(
         &self,
         _source: &Source,
-        _probe: &crate::process::ProcessProbe,
+        probe: &crate::process::ProcessProbe,
     ) -> Vec<LaunchRecord> {
-        Vec::new()
+        let threads: Vec<db::Thread> = self.threads.read().unwrap().values().cloned().collect();
+        let open = probe.open_files(AGENT);
+        live::launch_records(&threads, &open)
     }
     fn launch_plan(&self, source: &Source, session: &SessionMeta) -> LaunchPlan {
         launch_plan(source, session)

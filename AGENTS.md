@@ -58,9 +58,13 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
 
 - **Provider boundary:** all agent-specific code lives behind the `Provider` trait in
   `src/providers/`. Nothing outside `src/providers/claude/` may know Claude file formats, ccs, or
-  `CLAUDE_CONFIG_DIR`. Allowed elsewhere: the registry in `src/providers/mod.rs`, user-facing
-  help/docs text, `default_agent()` in `src/config.rs`, and sample data in tests. This keeps
-  other agents (e.g. Codex CLI) addable without touching shared code.
+  `CLAUDE_CONFIG_DIR`. Nothing outside `src/providers/codex/` may know Codex's SQLite schema
+  (`state_<n>.sqlite`) or its rollout (JSONL) format. Allowed elsewhere: the registry in
+  `src/providers/mod.rs`, user-facing help/docs text, `default_agent()` in `src/config.rs`, and
+  sample data in tests. This keeps other agents addable without touching shared code.
+  `src/providers/codex/db.rs` opens the state database read-only (see its module comment for why
+  a plain read-only open isn't enough while Codex holds it open in WAL mode) — no code path may
+  write to another agent's data, Codex's or otherwise.
 - **Platforms:** process liveness goes through `src/process.rs`; launching uses `exec` on Unix
   and spawn-and-wait on Windows (`src/launch.rs`). Don't add the `nix` crate.
 - **ratatui:** use its re-exported `ratatui::crossterm`; don't add a separate crossterm

@@ -315,13 +315,4 @@ mod tests {
         // Non-simple needles skip the prefilter.
         assert!(p.may_contain(&fixture, "\"zzzzqqq"));
     }
-
-    #[test]
-    fn registry_contains_claude() {
-        let all = crate::providers::all();
-        assert_eq!(
-            all.iter().map(|p| p.id()).collect::<Vec<_>>(),
-            vec!["claude"]
-        );
-    }
 }

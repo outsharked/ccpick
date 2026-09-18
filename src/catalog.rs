@@ -123,6 +123,9 @@ impl Catalog {
             }
             found.extend(metas.into_iter().map(|meta| (store_idx, meta)));
         }
+        for provider in &providers {
+            warnings.extend(provider.take_warnings());
+        }
 
         // 2. Launch records, with liveness from the probe.
         let mut launches: HashMap<(usize, String), Vec<(i64, usize)>> = HashMap::new();
@@ -181,14 +184,15 @@ impl Catalog {
         self.sources[source].env == self.host.env
     }
 
-    /// A session's index by its bare id. Correct only because ccpick currently registers a
-    /// single provider: the scan-time maps in `Catalog::build` (`launches`, `live`) key on
-    /// `(provider, id)` since two providers could otherwise mint the same id, but nothing
-    /// downstream of this lookup carries a provider alongside the id yet. Centralizing it here
-    /// means a second provider only has to fix one place, not every call site that currently
-    /// assumes ids are globally unique.
-    pub fn find_by_id(&self, id: &str) -> Option<usize> {
-        self.sessions.iter().position(|s| s.meta.id == id)
+    /// A session's index by its provider id and bare session id. Nothing stops two providers
+    /// from minting the same bare id (a Codex thread id and a Claude session id are just
+    /// coincidence away from colliding), which is exactly why the scan-time maps in
+    /// `Catalog::build` (`launches`, `live`) key on `(provider, id)` rather than `id` alone. This
+    /// lookup mirrors that: `agent` is `SessionMeta::agent`, i.e. the owning provider's `id()`.
+    pub fn find_by_id(&self, agent: &str, id: &str) -> Option<usize> {
+        self.sessions
+            .iter()
+            .position(|s| s.meta.agent == agent && s.meta.id == id)
     }
 
     /// The session's project dir as a path ccpick can check on disk.
@@ -383,6 +387,48 @@ mod tests {
         // "other" has the newest record but can't see store /s; "two" is newest among eligible.
         assert_eq!(c.sessions[0].default_source, 1);
         assert_eq!(c.sessions[0].live, None);
+    }
+
+    #[test]
+    fn two_providers_sharing_a_session_id_resolve_separately() {
+        // Nothing stops two providers from minting the same bare session id -- a Codex thread id
+        // and a Claude session id landing on the same string is just coincidence away. Build a
+        // catalog with two distinct `FakeProvider`s (see `FakeProvider::with_id`) that each have
+        // a session literally called "shared", and confirm `find_by_id` resolves each request to
+        // the session belonging to the provider named in it, not to whichever registered first.
+        let mut one = FakeProvider::with_id("one");
+        one.add_source("src-one", "/s");
+        one.add_session("/s", "shared", "From provider one", 1000, 1000, &[]);
+
+        let mut two = FakeProvider::with_id("two");
+        two.add_source("src-two", "/t");
+        two.add_session("/t", "shared", "From provider two", 2000, 2000, &[]);
+
+        let settings = Settings::default();
+        let homes = [crate::homes::Home::native(&settings.host, "/fake".into())];
+        let c = Catalog::build(
+            vec![Box::new(one), Box::new(two)],
+            &settings,
+            &homes,
+            &mut Cache::in_memory(),
+        )
+        .unwrap();
+
+        let idx_one = c
+            .find_by_id("one", "shared")
+            .expect("provider one's session");
+        let idx_two = c
+            .find_by_id("two", "shared")
+            .expect("provider two's session");
+        assert_ne!(
+            idx_one, idx_two,
+            "each provider's \"shared\" must resolve separately"
+        );
+        assert_eq!(c.sessions[idx_one].meta.title, "From provider one");
+        assert_eq!(c.sessions[idx_two].meta.title, "From provider two");
+
+        // A provider id that isn't registered must never fall back to someone else's session.
+        assert_eq!(c.find_by_id("three", "shared"), None);
     }
 
     #[test]

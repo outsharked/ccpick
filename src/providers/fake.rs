@@ -6,8 +6,13 @@ use crate::model::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Default)]
 pub struct FakeProvider {
+    /// The id this instance reports from `Provider::id` and stamps onto every `SessionMeta` it
+    /// scans. Configurable (rather than a hardcoded "fake") so a test can register two
+    /// `FakeProvider`s that behave as genuinely distinct providers -- see
+    /// `FakeProvider::with_id` -- the way `catalog::Catalog::find_by_id` needs to disambiguate
+    /// once more than one provider is registered.
+    pub id: &'static str,
     pub sources: Vec<Source>,
     /// Sources returned for a foreign (non-native) home, keyed by the home's label. Lets tests
     /// simulate a source that's discoverable from more than one home (e.g. a configured
@@ -19,7 +24,29 @@ pub struct FakeProvider {
     pub records: HashMap<String, Vec<LaunchRecord>>,
 }
 
+impl Default for FakeProvider {
+    fn default() -> Self {
+        FakeProvider {
+            id: "fake",
+            sources: Vec::new(),
+            foreign_sources: HashMap::new(),
+            stores: HashMap::new(),
+            files: HashMap::new(),
+            records: HashMap::new(),
+        }
+    }
+}
+
 impl FakeProvider {
+    /// A second, distinct `FakeProvider`: same shape, a different `id()`. Its own doc comment on
+    /// the `id` field says why this exists.
+    pub fn with_id(id: &'static str) -> Self {
+        FakeProvider {
+            id,
+            ..Default::default()
+        }
+    }
+
     pub fn add_source(&mut self, name: &str, store: &str) {
         self.add_source_in(name, store, crate::env::Env::Linux, "/fake");
     }
@@ -27,7 +54,7 @@ impl FakeProvider {
     /// A source in a specific environment (e.g. Windows seen from WSL).
     pub fn add_source_in(&mut self, name: &str, store: &str, env: crate::env::Env, env_home: &str) {
         let config_dir = format!("/fake/{name}");
-        let source = Self::build_source(name, &config_dir, env, env_home);
+        let source = self.build_source(name, &config_dir, env, env_home);
         self.sources.push(source);
         self.stores.insert(name.into(), PathBuf::from(store));
     }
@@ -44,7 +71,7 @@ impl FakeProvider {
         env_home: &str,
         config_dir: &str,
     ) {
-        let source = Self::build_source(name, config_dir, env, env_home);
+        let source = self.build_source(name, config_dir, env, env_home);
         self.foreign_sources
             .entry(label.into())
             .or_default()
@@ -52,10 +79,16 @@ impl FakeProvider {
         self.stores.insert(name.into(), PathBuf::from(store));
     }
 
-    fn build_source(name: &str, config_dir: &str, env: crate::env::Env, env_home: &str) -> Source {
+    fn build_source(
+        &self,
+        name: &str,
+        config_dir: &str,
+        env: crate::env::Env,
+        env_home: &str,
+    ) -> Source {
         let config_dir = PathBuf::from(config_dir);
         Source {
-            agent: "fake".into(),
+            agent: self.id.into(),
             name: name.into(),
             env_config_dir: config_dir.clone(),
             config_dir,
@@ -79,7 +112,7 @@ impl FakeProvider {
     ) {
         let path = PathBuf::from(store).join(format!("{id}.jsonl"));
         let meta = SessionMeta {
-            agent: "fake".into(),
+            agent: self.id.into(),
             id: id.into(),
             path: path.clone(),
             title: title.into(),
@@ -114,7 +147,7 @@ impl FakeProvider {
 
 impl Provider for FakeProvider {
     fn id(&self) -> &'static str {
-        "fake"
+        self.id
     }
     fn discover_sources(
         &self,

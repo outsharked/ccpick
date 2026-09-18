@@ -30,6 +30,10 @@ pub fn sessions_payload(catalog: &Catalog, generation: u64, now_ms: i64) -> Valu
                 .map(|(_, live_idx)| catalog.sources[live_idx].name.clone());
             json!({
                 "id": session.meta.id,
+                // Alongside "id" so the client can hand both back to /api/messages, /api/focus
+                // and /api/launch: `Catalog::find_by_id` needs the pair now that a second
+                // provider can mint the same bare id.
+                "agent": session.meta.agent,
                 "title": session.meta.title,
                 "cwd": cwd,
                 "branch": session.meta.branch,
@@ -93,6 +97,7 @@ mod tests {
             .iter()
             .find(|s| s["title"] == "Running thing")
             .unwrap();
+        assert_eq!(running["agent"], "fake");
         assert_eq!(running["pid"], 4242);
         assert_eq!(running["running"], true);
         assert_eq!(running["source"], "two");

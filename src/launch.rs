@@ -112,8 +112,10 @@ pub fn terminal_command(
         (Env::Windows, Env::Windows) => {
             let mut argv = windows_terminal_prefix(on_path);
             // Windows Terminal's own inherited-cwd behaviour isn't reliable when it's spawned
-            // by another process rather than typed at a prompt, so pin it explicitly.
-            if argv[0] == "wt.exe" && !plan.cwd.as_os_str().is_empty() {
+            // by another process rather than typed at a prompt, so pin it explicitly. When
+            // there's no `wt.exe` to hand a `-d` to, `spawn_in_new_terminal` runs `plan.argv`
+            // directly in a fresh console (`Command::current_dir` covers the cwd there).
+            if !argv.is_empty() && !plan.cwd.as_os_str().is_empty() {
                 argv.push("-d".to_string());
                 argv.push(plan.cwd.display().to_string());
             }
@@ -132,10 +134,16 @@ pub fn terminal_command(
                 argv.push("--cd".to_string());
                 argv.push(plan.cwd.display().to_string());
             }
-            argv.push("--".to_string());
-            // `wsl.exe -- <argv>` execs the command directly with no shell in between, so a
-            // shell-style `VAR=value` prefix wouldn't be interpreted; `env` applies the same
-            // adjustments the native launch path gets from `Command::env`/`env_remove`.
+            // `--exec` execve's the command directly with no shell in between. A bare `--`
+            // instead would hand the rest of the line to the distro's default shell, which
+            // expands `$(...)`/backticks/`$VAR` in every word — including argv elements built
+            // from user-chosen free text (e.g. a ccs account name) — so it's not an option here.
+            argv.push("--exec".to_string());
+            // Because `--exec` skips the shell, `plan.env_set`'s shell-style `VAR=value` prefix
+            // and `plan.env_remove`'s `unset` have nothing to interpret them; `env` is a real
+            // program the distro resolves on its own PATH, so exec'ing it applies the same
+            // adjustments the native launch path gets from `Command::env`/`env_remove`. The
+            // trailing `--` stops `env` from parsing `plan.argv`'s own words as its options.
             if !plan.env_set.is_empty() || !plan.env_remove.is_empty() {
                 argv.push("env".to_string());
                 for key in &plan.env_remove {
@@ -145,6 +153,7 @@ pub fn terminal_command(
                 for (key, value) in &plan.env_set {
                     argv.push(format!("{key}={value}"));
                 }
+                argv.push("--".to_string());
             }
             argv.extend(plan.argv.iter().cloned());
             Some(argv)
@@ -188,16 +197,17 @@ pub fn terminal_command(
     }
 }
 
+/// `["wt.exe"]` when Windows Terminal is on `PATH`, else empty. There is deliberately no
+/// `cmd.exe /c start` fallback: `Command`'s Windows argument quoting is built for
+/// `CreateProcessW`/`CommandLineToArgvW`, and `cmd.exe` would re-parse that same line under its
+/// own, different rules (`&`, `%`, `^`, `|` are metacharacters there) — a project directory or
+/// ccs account name containing any of them would break the launch. When this returns empty,
+/// `spawn_in_new_terminal` runs the command directly and opens its own console window instead.
 fn windows_terminal_prefix(on_path: &dyn Fn(&str) -> bool) -> Vec<String> {
     if on_path("wt.exe") {
         vec!["wt.exe".to_string()]
     } else {
-        vec![
-            "cmd.exe".to_string(),
-            "/c".to_string(),
-            "start".to_string(),
-            String::new(),
-        ]
+        Vec::new()
     }
 }
 
@@ -224,6 +234,20 @@ pub fn spawn_in_new_terminal(
     }
     for (key, value) in &plan.env_set {
         command.env(key, value);
+    }
+    // Detach the new window from ccpick's own process group (Unix) or console (Windows), so a
+    // Ctrl-C aimed at ccpick — or at the shell running the web portal — doesn't take the new
+    // terminal down with it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        command.creation_flags(CREATE_NEW_CONSOLE);
     }
     command
         .stdin(std::process::Stdio::null())
@@ -361,15 +385,16 @@ mod tests {
     }
 
     #[test]
-    fn without_windows_terminal_it_falls_back_to_cmd_start() {
+    fn without_windows_terminal_the_command_is_returned_unprefixed() {
+        // No `cmd.exe /c start` wrapper: `spawn_in_new_terminal` runs this directly and opens
+        // its own console (CREATE_NEW_CONSOLE) instead of asking cmd.exe to re-parse a line
+        // `Command` already quoted for `CreateProcessW`.
         let host = HostContext {
             env: Env::Windows,
             ..Default::default()
         };
         let argv = terminal_command(&plan(), &Env::Windows, &host, None, &nothing_on_path).unwrap();
-        assert_eq!(argv[0], "cmd.exe");
-        assert_eq!(argv[1], "/c");
-        assert_eq!(argv[2], "start");
+        assert_eq!(argv, plan().argv);
     }
 
     #[test]
@@ -402,12 +427,17 @@ mod tests {
         plan.env_remove.push("OTHER".into());
         let argv = terminal_command(&plan, &target, &host, None, &|name| name == "wt.exe").unwrap();
         assert!(argv.windows(2).any(|w| w == ["--cd", "/home/me/proj"]));
-        assert!(argv.iter().any(|a| a == "OTHER"));
-        assert!(argv.iter().any(|a| a == "CLAUDE_CONFIG_DIR=/alt"));
-        // The `--` separator (exec, no shell) must come before the env adjustments and the argv.
-        let sep = argv.iter().position(|a| a == "--").unwrap();
+        // `--exec` (not a bare `--`) is what makes this safe: exec, no shell, no `$(...)`
+        // expansion of anything in `plan.argv`. `env` then applies the adjustments, and its own
+        // `-u NAME`/`NAME=VALUE` args must sit adjacent in this exact shape, not just present
+        // anywhere in the line.
+        assert!(
+            argv.windows(5)
+                .any(|w| w == ["env", "-u", "OTHER", "CLAUDE_CONFIG_DIR=/alt", "--"])
+        );
+        let exec_pos = argv.iter().position(|a| a == "--exec").unwrap();
         let env_pos = argv.iter().position(|a| a == "env").unwrap();
-        assert!(sep < env_pos);
+        assert!(exec_pos < env_pos);
     }
 
     #[test]
@@ -473,9 +503,23 @@ mod tests {
             .push(("CLAUDE_CONFIG_DIR".into(), "/alt".into()));
         let argv = terminal_command(&plan, &Env::MacOs, &host, None, &nothing_on_path).unwrap();
         let script = argv.last().unwrap();
-        assert!(script.contains("CLAUDE_CONFIG_DIR="));
-        assert!(script.contains("/alt"));
-        assert!(script.contains("/home/me/proj"));
+        // Order matters here, not just presence: the cwd must be set (`cd ... &&`) before the
+        // env assignment runs, and the assignment's name must precede its value.
+        let cwd_pos = script
+            .find("/home/me/proj")
+            .expect("cwd is set in the script");
+        let name_pos = script
+            .find("CLAUDE_CONFIG_DIR=")
+            .expect("env var is assigned in the script");
+        let value_pos = script[name_pos..]
+            .find("/alt")
+            .map(|i| i + name_pos)
+            .expect("env var value follows its name");
+        assert!(cwd_pos < name_pos, "cwd must be set before the env var");
+        assert!(
+            name_pos < value_pos,
+            "the assignment name must precede its value"
+        );
     }
 
     #[test]

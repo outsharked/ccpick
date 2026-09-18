@@ -366,9 +366,14 @@ mod tests {
         let d = discover(&s, &native(&s)).unwrap();
         assert_eq!(names(&d), vec!["alt-claude"]);
         assert_eq!(d.sources[0].launch.argv_prefix, vec!["claude"]);
+        // The launch env holds the canonical path (on macOS the tempdir is under a
+        // /var -> /private/var symlink), so compare against that, not the raw tempdir path.
         assert_eq!(
             d.sources[0].launch.env_set,
-            vec![(ENV_CONFIG_DIR.to_string(), dir.display().to_string())]
+            vec![(
+                ENV_CONFIG_DIR.to_string(),
+                dunce::canonicalize(&dir).unwrap().display().to_string()
+            )]
         );
     }
 
@@ -436,7 +441,10 @@ mod tests {
         assert!(d.sources[0].launch.env_set.is_empty());
         assert_eq!(
             d.sources[1].launch.env_set,
-            vec![(ENV_CONFIG_DIR.to_string(), cli.display().to_string())]
+            vec![(
+                ENV_CONFIG_DIR.to_string(),
+                dunce::canonicalize(&cli).unwrap().display().to_string()
+            )]
         );
         assert_eq!(d.warnings.len(), 1);
         assert!(d.warnings[0].contains("missing"));

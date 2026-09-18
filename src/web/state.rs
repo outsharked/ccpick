@@ -277,12 +277,18 @@ mod tests {
     fn a_failing_rebuild_leaves_the_last_good_catalog_in_place() {
         let portal = Arc::new(Portal::new(fake_catalog(), "token".into()));
         let stop = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = calls.clone();
         refresh_loop(
             portal.clone(),
             Duration::from_millis(1),
-            || anyhow::bail!("disk went away"),
+            move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                anyhow::bail!("disk went away")
+            },
             stop,
         );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(portal.generation(), 0);
         assert!(!portal.catalog().sessions.is_empty());
     }

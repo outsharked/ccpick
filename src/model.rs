@@ -95,6 +95,13 @@ pub trait Provider: Send + Sync {
     /// Canonical transcript store for a source, if present.
     fn store_for(&self, source: &Source) -> Option<PathBuf>;
     fn list_session_files(&self, store: &Path) -> Vec<PathBuf>;
+    /// Problems met while listing that the user should be told about, drained by the catalog
+    /// after every store has been listed. Listing returns no session for a store it cannot read,
+    /// which on its own is indistinguishable from a store that is simply empty; anything a
+    /// provider reports here becomes a catalog warning instead of a silent absence.
+    fn take_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn scan_file(&self, path: &Path) -> Option<SessionMeta>;
     /// Conversation text only (no tool payloads).
     fn messages(&self, path: &Path) -> Vec<Message>;

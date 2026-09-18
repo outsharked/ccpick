@@ -142,10 +142,16 @@ On a Windows machine with WSL, ccpick also lists the other side's sessions:
   `win:<name>` sources.
 - On Windows, sessions in *running* WSL distros appear as `wsl:<name>` (or `<distro>:<name>` with several distros). Stopped distros aren't started.
 
-Those sessions are searchable like any other. For Claude, running ones are shown as running
-whichever side ccpick is on — that's what the console-title and interop-socket matching below
-does. Codex's running detection (see [Codex](#codex) above) doesn't reach across this boundary:
-a Codex session only shows as running when ccpick is on the same side it's running on. Pressing
+Those sessions are searchable like any other, with one exception: a Codex thread's index records
+the path of its rollout file in its *own* environment's form, so from the other side ccpick can
+list a foreign Codex session and resume it, but can't open the transcript — the preview is blank
+and full-text search doesn't reach inside it. Titles, paths and timestamps all come from the index
+and are unaffected.
+
+For Claude, running ones are shown as running whichever side ccpick is on — that's what the
+console-title and interop-socket matching below does. Codex's running detection (see
+[Codex](#codex) above) doesn't reach across this boundary: a Codex session only shows as running
+when ccpick is on the same side it's running on. Pressing
 Enter on a session that isn't running opens a dialog with the command to paste into a shell on
 the other side (`c` copies it), since ccpick doesn't launch across the boundary.
 

@@ -19,6 +19,7 @@ const TITLE_MAX: usize = 80;
 #[derive(Default)]
 pub struct CodexProvider {
     threads: RwLock<HashMap<PathBuf, db::Thread>>,
+    warnings: RwLock<Vec<String>>,
 }
 
 /// The first non-blank line of `s`, trimmed and cut to `max` chars with a trailing ellipsis —
@@ -36,14 +37,20 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Title precedence: the name the user set, then the thread's own title (often model-generated),
-/// then a truncation of the first message — the same custom > generated > first-message order
-/// the Claude provider uses for its own title fields.
+/// then the first message — the same custom > generated > first-message order the Claude provider
+/// uses for its own title fields.
+///
+/// Every branch is truncated, which is where this differs from Claude: Codex's `title` column
+/// frequently holds the entire first prompt rather than a short generated label, so it arrives
+/// multi-line and sometimes kilobytes long. A title is a single short line everywhere it is
+/// used — one record per line in `--list`, one row in the TUI, a window title to match when
+/// focusing — so it is cut here, at the one place all three branches pass through.
 fn title_for(thread: &db::Thread) -> String {
     if let Some(name) = thread.name.as_deref().filter(|s| !s.trim().is_empty()) {
-        return name.to_string();
+        return truncate(name, TITLE_MAX);
     }
     if !thread.title.trim().is_empty() {
-        return thread.title.clone();
+        return truncate(&thread.title, TITLE_MAX);
     }
     if thread.first_user_message.trim().is_empty() {
         return "(untitled)".to_string();
@@ -81,11 +88,20 @@ impl Provider for CodexProvider {
         db::newest_state_db(&source.config_dir)
     }
     /// Loads every listable thread from the store's database into `self.threads`, keyed by its
-    /// rollout path, so `scan_file` never has to touch the database again. A missing or
-    /// unreadable database means no sessions, not a crash.
+    /// rollout path, so `scan_file` never has to touch the database again. A database that cannot
+    /// be read means no sessions, not a crash — but it is reported, because Codex's whole session
+    /// list lives in this one file: schema drift or a permission problem would otherwise make
+    /// every Codex session quietly disappear with nothing on screen to explain it.
     fn list_session_files(&self, store: &Path) -> Vec<PathBuf> {
-        let Ok(threads) = db::listable_threads(store) else {
-            return Vec::new();
+        let threads = match db::listable_threads(store) {
+            Ok(threads) => threads,
+            Err(err) => {
+                self.warnings
+                    .write()
+                    .unwrap()
+                    .push(format!("cannot read {}: {err:#}", store.display()));
+                return Vec::new();
+            }
         };
         let mut map = self.threads.write().unwrap();
         let mut paths = Vec::with_capacity(threads.len());
@@ -94,6 +110,9 @@ impl Provider for CodexProvider {
             map.insert(thread.rollout_path.clone(), thread);
         }
         paths
+    }
+    fn take_warnings(&self) -> Vec<String> {
+        std::mem::take(&mut *self.warnings.write().unwrap())
     }
     fn scan_file(&self, path: &Path) -> Option<SessionMeta> {
         let threads = self.threads.read().unwrap();
@@ -212,6 +231,51 @@ mod tests {
             .expect("listed files must scan");
         assert_eq!(meta.agent, "codex");
         assert!(!meta.id.is_empty());
+    }
+
+    #[test]
+    fn a_database_it_cannot_read_is_reported_not_silently_empty() {
+        // Every Codex session lives behind this one file, so "no sessions" and "I could not open
+        // the index" look identical on screen unless the error is carried out.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("state_5.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE threads (id TEXT)").unwrap();
+        drop(conn);
+
+        let provider = CodexProvider::default();
+        assert!(provider.list_session_files(&db).is_empty());
+        let warnings = provider.take_warnings();
+        assert_eq!(warnings.len(), 1, "one warning per unreadable store");
+        assert!(
+            warnings[0].contains("state_5.sqlite"),
+            "the warning must name the file: {}",
+            warnings[0]
+        );
+        assert!(
+            provider.take_warnings().is_empty(),
+            "draining twice must not repeat it"
+        );
+    }
+
+    #[test]
+    fn every_title_source_is_cut_to_one_short_line() {
+        // Codex's `title` column is not a short generated label the way Claude's is: it is very
+        // often the whole first prompt, multi-line and kilobytes long. Untruncated it breaks the
+        // one-record-per-line `--list` format, overflows a TUI row, and is handed to the focus
+        // code as a window title it could never match.
+        let long = format!("{}\nsecond line", "x".repeat(200));
+        let from_title = title_for(&thread("", &long, ""));
+        assert_eq!(from_title.chars().count(), TITLE_MAX);
+        assert!(!from_title.contains('\n'));
+
+        let from_name = title_for(&thread(&long, "", ""));
+        assert_eq!(from_name.chars().count(), TITLE_MAX);
+        assert!(!from_name.contains('\n'));
+
+        let from_first = title_for(&thread("", "", &long));
+        assert_eq!(from_first.chars().count(), TITLE_MAX);
+        assert!(!from_first.contains('\n'));
     }
 
     #[test]

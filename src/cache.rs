@@ -5,7 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const VERSION: u32 = 1;
+/// Bumped whenever a stored `SessionMeta` field can be wrong for entries written by an older
+/// build. A stale entry is only rescanned when its file's stamp changes, so a fix to how a field
+/// is derived would otherwise never reach sessions that have gone quiet. (v2: Codex titles were
+/// stored untruncated.)
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stamp {

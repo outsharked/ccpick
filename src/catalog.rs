@@ -123,6 +123,9 @@ impl Catalog {
             }
             found.extend(metas.into_iter().map(|meta| (store_idx, meta)));
         }
+        for provider in &providers {
+            warnings.extend(provider.take_warnings());
+        }
 
         // 2. Launch records, with liveness from the probe.
         let mut launches: HashMap<(usize, String), Vec<(i64, usize)>> = HashMap::new();

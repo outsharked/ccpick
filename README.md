@@ -63,6 +63,37 @@ conversation text appear below a divider shortly after.
 | `Home` / `End` | First/last session (list) or top/bottom of the conversation (preview) |
 | `Esc` | Clear the search; with nothing to clear, quit after a confirmation (`Ctrl-C` quits outright) |
 
+## Web portal
+
+```bash
+ccpick web                 # serve the session list and open it in a browser
+ccpick web --no-open       # print the URL instead
+ccpick web --port 4200     # pin the port (default: chosen by the OS)
+ccpick web --refresh 30    # seconds between refreshes (default: 10)
+```
+
+`ccpick web` is a companion to the TUI, not a replacement: it serves the same session
+list, built from the same catalog, as a page at `http://127.0.0.1:<port>`, and opens it
+in your browser. It refreshes automatically and does nothing on its own besides that —
+no session starts until you click one.
+
+Click a session that's running and its terminal comes to the front, the same as
+`Enter` in the TUI. Click a stopped one and it resumes in a new terminal. Where ccpick
+has no terminal to open, or the session lives across the Windows/WSL boundary, the page
+shows the command to paste instead, with a copy button — the same fallback the TUI
+already offers.
+
+It's loopback-only: the server binds `127.0.0.1`, refuses any request whose `Host` or
+`Origin` isn't itself, and mints a fresh token per run that's baked into the URL it
+opens and required on every request after that. There's no flag to bind it anywhere
+else, no accounts, and nothing persisted beyond ccpick's own metadata cache.
+
+`cargo build --no-default-features` builds the TUI with no HTTP dependency at all, and
+that build has no `web` subcommand.
+
+Since `web` is a subcommand rather than a flag, searching for the literal word "web"
+needs `ccpick --list -- web` — plain `ccpick --list web` starts the portal instead.
+
 ## Sources
 
 Discovered in order (earlier wins as the default launcher):

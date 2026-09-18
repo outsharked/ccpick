@@ -17,3 +17,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: fmt, clippy, tests
         run: mise run check
+
+  no-default-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@v2
+      - name: build and test without the web feature
+        run: |
+          cargo build --no-default-features
+          cargo test --no-default-features
+      - name: the HTTP crate must not sneak back in as a non-optional dependency
+        run: |
+          if cargo tree --no-default-features -e normal | grep -q tiny_http; then
+            echo "tiny_http is in the dependency tree even with --no-default-features: the web feature has stopped being optional" >&2
+            exit 1
+          fi

@@ -46,6 +46,13 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
 - For smoke tests use `mise dev -- --sources` and `mise dev -- --list <query>`. Both read the
   real session data; neither writes anything except ccpick's own cache.
 - Never modify anything under `~/.ccs` or `~/.claude`.
+- Never leave a portal (`ccpick web`) running after a task: it's a live process that keeps scanning
+  real session data and holds a listening socket open indefinitely (only Ctrl-C or being killed
+  ends it — nothing else does). Smoke-test it with `mise dev -- web --no-open` and `curl` (the
+  token is in the printed URL), then stop the process yourself. Watch for it dispatching by
+  accident: `web` is a subcommand, so it can win over the query positional it looks like
+  (`ccpick --list web` starts the portal rather than listing sessions matching "web" — see the
+  README's "Web portal" section).
 
 ## Architecture rules
 
@@ -63,6 +70,14 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
   word wrapping and wide characters.
 - **Resolve paths before storing them:** anything passed to a launched process (e.g. a
   `CLAUDE_CONFIG_DIR` value) must be absolute, because the launch changes directory first.
+- **Web portal boundary:** the portal (`src/web/`) lives behind the default-on `web` cargo
+  feature (`cargo build --no-default-features` drops it, and the `tiny_http`/`getrandom`
+  dependencies with it — CI's `no-default-features` job checks both). `src/web/server.rs` is the
+  only file that may mention the HTTP crate; everything else, tests included, goes through
+  `route()` in `src/web/route.rs`, which is pure over a `&Portal` (no socket, no HTTP crate) and
+  returns a plain `Res`. Never hold a `Portal` guard (the `RwLock`/`Mutex` fields in
+  `src/web/state.rs`) across handler work: copy out what's needed under the lock (see
+  `Portal::published()`) and let the guard drop before doing anything else.
 
 ## Windows and WSL
 

@@ -168,15 +168,55 @@ fn tab_marker(pid: u32) -> String {
     format!("ccpick-{pid}-{nanos:08x}")
 }
 
-/// Focuses the terminal running a session. Ok holds a message for the status line.
+/// Reads the session's own interop socket and launches the helper through it, from inside the
+/// distro. `$1` is the session's pid and `$2` the PowerShell script, both passed as arguments so
+/// nothing has to be quoted into the script text.
+const WSL_FOCUS_SCRIPT: &str = "socket=$(tr '\\000' '\\n' < /proc/$1/environ \
+| sed -n 's/^WSL_INTEROP=//p' | head -n1); \
+[ -n \"$socket\" ] || exit 3; \
+ps=powershell.exe; \
+command -v powershell.exe >/dev/null 2>&1 || \
+ps=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; \
+WSL_INTEROP=$socket exec \"$ps\" -NoProfile -NonInteractive -WindowStyle Hidden -Command \"$2\"";
+
+/// `wsl.exe` arguments that run the focus helper inside `distro` for `pid`.
+pub fn wsl_focus_args(distro: &str, pid: u32, script: &str) -> Vec<String> {
+    vec![
+        "-d".into(),
+        distro.into(),
+        "--exec".into(),
+        "sh".into(),
+        "-c".into(),
+        WSL_FOCUS_SCRIPT.into(),
+        "sh".into(),
+        pid.to_string(),
+        script.into(),
+    ]
+}
+
+/// Whether a Linux-domain pid from `env` is in this host's own process namespace, so its
+/// `/proc` can be read directly rather than through `wsl.exe`.
+fn is_own_namespace(host: &Env, env: &Env) -> bool {
+    match (host, env) {
+        (Env::Wsl { distro: h }, Env::Wsl { distro }) => {
+            h == crate::env::UNKNOWN_DISTRO || h.eq_ignore_ascii_case(distro)
+        }
+        (Env::Wsl { .. }, _) => true,
+        _ => false,
+    }
+}
+
+/// Focuses the terminal running a session. `env` is the environment the session belongs to and
+/// `domain` its process namespace. Ok holds a message for the status line.
 pub fn focus_session(
     pid: u32,
     domain: PidDomain,
+    env: &Env,
     host: &HostContext,
     tab_title: Option<&str>,
 ) -> Result<String, String> {
     match (&host.env, domain) {
-        (Env::Wsl { .. }, PidDomain::Linux) => {
+        (Env::Wsl { .. }, PidDomain::Linux) if is_own_namespace(&host.env, env) => {
             // The session's own interop socket puts the helper inside its terminal.
             let socket = std::fs::read(format!("/proc/{pid}/environ"))
                 .ok()
@@ -189,19 +229,50 @@ pub fn focus_session(
                 host,
             )
         }
+        // A session in another distro: the same interop-socket route, run from inside it.
+        (Env::Wsl { .. } | Env::Windows, PidDomain::Linux) => match env {
+            Env::Wsl { distro } => run_focus_script_in_distro(
+                distro,
+                pid,
+                &focus_script(Target::Inherited, &tab_marker(pid), tab_title),
+                host,
+            ),
+            _ => Err("could not find the terminal window for this session".into()),
+        },
         (Env::Wsl { .. } | Env::Windows, PidDomain::Windows) => run_focus_script(
             &focus_script(Target::Console(pid), &tab_marker(pid), tab_title),
             None,
             host,
         ),
-        (Env::Windows, PidDomain::Linux) => {
-            Err("focusing a WSL session's terminal from Windows isn't supported".into())
-        }
         (host_env, _) => Err(format!(
             "focusing a terminal isn't supported on {}",
             host_env.display_name()
         )),
     }
+}
+
+/// Spawns the focus helper inside a WSL distro. Fire-and-forget, like `run_focus_script`.
+fn run_focus_script_in_distro(
+    distro: &str,
+    pid: u32,
+    script: &str,
+    host: &HostContext,
+) -> Result<String, String> {
+    let args = wsl_focus_args(distro, pid, script);
+    for tool in crate::env::windows_tool_candidates("wsl.exe", &host.wsl_mount_root) {
+        let spawned = Command::new(&tool)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if spawned.is_ok() {
+            return Ok(String::new());
+        }
+    }
+    Err(format!(
+        "could not run wsl.exe to focus the terminal in {distro}"
+    ))
 }
 
 /// Spawns PowerShell with `script`, optionally through a session's interop socket. Fire-and-forget:
@@ -339,19 +410,88 @@ mod tests {
     }
 
     #[test]
+    fn a_session_in_another_distro_is_focused_through_wsl_exe() {
+        let args = wsl_focus_args("Ubuntu-24.04", 1234, "$hwnd=0");
+        assert_eq!(&args[..5], &["-d", "Ubuntu-24.04", "--exec", "sh", "-c"]);
+        // The pid and the script are arguments, never interpolated into the shell text.
+        assert_eq!(&args[6..], &["sh", "1234", "$hwnd=0"]);
+        let script = &args[5];
+        assert!(script.contains("/proc/$1/environ"));
+        assert!(script.contains("WSL_INTEROP=//p"));
+        assert!(script.contains("WSL_INTEROP=$socket exec"));
+        // The helper runs in the session's console, so it matches the tab by title.
+        assert!(script.contains("-Command \"$2\""));
+    }
+
+    #[test]
+    fn a_wsl_session_focused_from_windows_uses_the_title_matching_script() {
+        // What run_focus_script_in_distro passes as $2: an Inherited-target script, because the
+        // helper is launched inside the session's own console.
+        let script = focus_script(Target::Inherited, "unused", Some("hello"));
+        assert!(script.contains("$id=$PID"));
+        assert!(script.contains("Find-Tab 'hello' $false"));
+    }
+
+    #[test]
+    fn only_wsl_sessions_can_be_focused_in_a_distro() {
+        let windows = HostContext {
+            env: Env::Windows,
+            wsl_mount_root: "/mnt/".into(),
+        };
+        // A Linux-domain pid that belongs to no distro can't be reached from Windows.
+        let error = focus_session(1, PidDomain::Linux, &Env::Linux, &windows, None).unwrap_err();
+        assert_eq!(error, "could not find the terminal window for this session");
+    }
+
+    #[test]
+    fn a_hosts_own_distro_is_not_routed_through_wsl_exe() {
+        let ubuntu = Env::Wsl {
+            distro: "Ubuntu".into(),
+        };
+        let host = HostContext {
+            env: ubuntu.clone(),
+            wsl_mount_root: "/mnt/".into(),
+        };
+        assert!(is_own_namespace(&host.env, &ubuntu));
+        assert!(is_own_namespace(
+            &host.env,
+            &Env::Wsl {
+                distro: "UBUNTU".into()
+            }
+        ));
+        assert!(!is_own_namespace(
+            &host.env,
+            &Env::Wsl {
+                distro: "Debian".into()
+            }
+        ));
+        // A host that doesn't know its own distro name assumes every distro is its own.
+        let unknown = Env::Wsl {
+            distro: crate::env::UNKNOWN_DISTRO.into(),
+        };
+        assert!(is_own_namespace(
+            &unknown,
+            &Env::Wsl {
+                distro: "Debian".into()
+            }
+        ));
+        assert!(!is_own_namespace(&Env::Windows, &ubuntu));
+    }
+
+    #[test]
     fn unsupported_hosts_explain_themselves() {
         let linux = HostContext {
             env: Env::Linux,
             wsl_mount_root: "/mnt/".into(),
         };
-        let error = focus_session(1, PidDomain::Linux, &linux, None).unwrap_err();
+        let error = focus_session(1, PidDomain::Linux, &Env::Linux, &linux, None).unwrap_err();
         assert_eq!(error, "focusing a terminal isn't supported on Linux");
         let mac = HostContext {
             env: Env::MacOs,
             wsl_mount_root: "/mnt/".into(),
         };
         assert!(
-            focus_session(1, PidDomain::Windows, &mac, None)
+            focus_session(1, PidDomain::Windows, &Env::MacOs, &mac, None)
                 .unwrap_err()
                 .contains("macOS")
         );

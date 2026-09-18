@@ -3,6 +3,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Stand-in distro name for a WSL host whose `WSL_DISTRO_NAME` isn't set.
+pub const UNKNOWN_DISTRO: &str = "wsl";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Env {
     /// Native Linux, not WSL.
@@ -105,7 +108,7 @@ pub fn detect_env(
             distro: distro.clone(),
         },
         None if wsl_interop => Env::Wsl {
-            distro: "wsl".into(),
+            distro: UNKNOWN_DISTRO.into(),
         },
         None => Env::Linux,
     }

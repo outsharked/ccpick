@@ -66,10 +66,15 @@ fn event_loop(
                 None => app.status = Some(format!("{} not found on PATH", plan.argv[0])),
             },
             Action::Focus { pid, source, title } => {
-                let result = match crate::process::PidDomain::of(&app.catalog.sources[source].env) {
-                    Some(domain) => {
-                        crate::focus::focus_session(pid, domain, &app.catalog.host, Some(&title))
-                    }
+                let env = app.catalog.sources[source].env.clone();
+                let result = match crate::process::PidDomain::of(&env) {
+                    Some(domain) => crate::focus::focus_session(
+                        pid,
+                        domain,
+                        &env,
+                        &app.catalog.host,
+                        Some(&title),
+                    ),
                     None => Err("no process model for this environment".into()),
                 };
                 // Success clears the status; when no terminal can be found, fall back to

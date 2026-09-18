@@ -35,7 +35,7 @@ pub fn launch_records(config_dir: &Path, env: &Env, probe: &ProcessProbe) -> Vec
                 .and_then(PidDomain::parse)
                 .or_else(|| PidDomain::of(env));
             let alive = match (domain, u32::try_from(r.pid)) {
-                (Some(domain), Ok(pid)) => probe.is_running(domain, pid, "claude"),
+                (Some(domain), Ok(pid)) => probe.is_running(domain, env, pid, "claude"),
                 _ => false,
             };
             LaunchRecord {
@@ -113,11 +113,17 @@ mod tests {
     fn non_claude_process_is_not_alive() {
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         let pid = child.id();
-        let alive = ProcessProbe::new(Env::Linux).is_running(PidDomain::Linux, pid, "claude");
+        let alive =
+            ProcessProbe::new(Env::Linux).is_running(PidDomain::Linux, &Env::Linux, pid, "claude");
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!alive);
-        assert!(!ProcessProbe::new(Env::Linux).is_running(PidDomain::Linux, 0, "claude"));
+        assert!(!ProcessProbe::new(Env::Linux).is_running(
+            PidDomain::Linux,
+            &Env::Linux,
+            0,
+            "claude"
+        ));
     }
 
     #[test]

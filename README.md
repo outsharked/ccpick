@@ -66,7 +66,7 @@ On a Windows machine with WSL, ccpick also lists the other side's sessions:
 - In WSL, Windows users' Claude Code data under `/mnt/c/Users/<user>` appears as `win:<name>` sources.
 - On Windows, sessions in *running* WSL distros appear as `wsl:<name>` (or `<distro>:<name>` with several distros). Stopped distros aren't started.
 
-Those sessions are searchable like any other. Pressing Enter on one opens a dialog with the command to paste into a shell on the other side (`c` copies it).
+Those sessions are searchable like any other, and running ones are shown as running whichever side ccpick is on. Pressing Enter on a session that isn't running opens a dialog with the command to paste into a shell on the other side (`c` copies it), since ccpick doesn't launch across the boundary.
 
 Pressing Enter on a session that is *running* brings its terminal to the front instead of
 resuming it, switching to the right tab where the terminal supports tabs (Windows Terminal does).
@@ -76,9 +76,10 @@ It takes a second or two, since the work runs through PowerShell.
   a unique marker, selects the tab showing it, then restores the previous title.
 - **WSL sessions** are found through the session's own interop socket, and the tab is matched by
   title — so if the terminal's title has drifted from the one ccpick shows, the window is raised
-  without switching tabs.
+  without switching tabs. This works from Windows and from another distro too, by running the
+  helper inside the session's own distro.
 - If no terminal can be found, the status line reports that the session is running, with the
-  reason. Focusing a WSL session's terminal from a Windows-hosted ccpick isn't supported.
+  reason.
 
 ```toml
 [environments]

@@ -64,7 +64,7 @@ printed.
 src/web/
   mod.rs      lifecycle: bind, mint token, open the browser, serve
   server.rs   tiny_http wiring; the only module that knows the HTTP crate
-  route.rs    route(method, path, query, headers, body, &Portal) -> ApiResponse
+  route.rs    route(&Req, &Portal) -> Res
   state.rs    Portal: catalog, generation, subscribers, refresh thread
   assets/     index.html, app.css, app.js (embedded with include_str!)
 ```
@@ -144,8 +144,12 @@ either.
 
 - **Running** → `focus::focus_session`, unchanged from the TUI.
 - **Stopped** → `spawn_in_new_terminal`, which resolves an argv per platform:
-  - Windows: `wt.exe`, falling back to `cmd /c start`.
-  - macOS: `open -a Terminal` (iTerm when present).
+  - Windows: `wt.exe -d <cwd> <launcher>`. When `wt.exe` isn't on `PATH`, the command is
+    returned unprefixed and `spawn_in_new_terminal` asks Windows for a new console itself
+    (`CREATE_NEW_CONSOLE`) rather than routing through `cmd.exe`, which would re-parse an
+    argument line already quoted for `CreateProcessW` under its own, different rules — a
+    project directory or account name containing `&`, `%`, `^` or `|` would break the launch.
+  - macOS: `osascript` driving `Terminal.app`'s `do script`.
   - Linux: `$TERMINAL`, then `x-terminal-emulator`, then a short list.
 - **Neither** → the response carries the ready-to-paste command and the page shows it
   with a copy button, the same fallback the TUI already offers for cross-environment
@@ -160,18 +164,18 @@ paste command rather than guessing at a terminal that may not exist.
 
 ## Errors
 
-Handlers return `Result<ApiResponse, ApiError>`; an `ApiError` renders as JSON with a
-message and an appropriate status. Catalog warnings ride along in the sessions payload
-exactly as they surface in the TUI's footer today. A failed launch returns the paste
-command so the user is never left with nothing.
+Handlers build a `Res` directly — `Res::json` for a payload, `Res::error` for a message plus
+a status — rather than a separate `Result`/error type. Catalog warnings ride along in the
+sessions payload exactly as they surface in the TUI's footer today. A failed launch returns
+the paste command so the user is never left with nothing.
 
 ## Testing
 
 - **Handlers**: `route()` is pure over a catalog, so tests use `fake_catalog()` and
   assert on parsed JSON. This covers auth, `Origin` rejection, 404s and every endpoint.
-- **Terminal spawning**: `terminal_command(plan, env, host) -> Option<Vec<String>>`
-  returns argv without spawning anything, so every platform's behaviour is testable on
-  every platform.
+- **Terminal spawning**: `terminal_command(plan, target, host, terminal_env, on_path) ->
+  Option<Vec<String>>` returns argv without spawning anything; `on_path` is injected rather
+  than checking the real `PATH`, so every platform's behaviour is testable on every platform.
 - **SSE**: the event encoder is a pure function over a generation number.
 - **Integration**: one test binds `127.0.0.1:0` and makes a real request, asserting it
   succeeds with the token and returns 401 without it.

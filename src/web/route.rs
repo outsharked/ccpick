@@ -153,7 +153,16 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
         ("GET", "/api/search") => {
             let query = query_param(req.query, "q").unwrap_or_default();
             let all: Vec<usize> = (0..catalog.sessions.len()).collect();
-            let matches = crate::search::fuzzy(&catalog, &all, &query);
+            // Ranked by position (fuzzy/full_text work in terms of indices into `catalog.sessions`
+            // for the scan itself), but handed to the client as ids: the same
+            // `Reverse(last_ts)`-sorted, periodically republished list that `/api/focus`,
+            // `/api/launch` and `/api/messages` stopped trusting positions from. A result
+            // rendered from a stale position could name a different session by the time a click
+            // on it reaches those endpoints.
+            let matches: Vec<&str> = crate::search::fuzzy(&catalog, &all, &query)
+                .into_iter()
+                .map(|idx| catalog.sessions[idx].meta.id.as_str())
+                .collect();
             // A newer search supersedes an older one still scanning: full_text checks this
             // ticket against the shared counter as it goes, so a search box wired per keystroke
             // can't pile up uncancellable scans across rayon's pool.
@@ -166,7 +175,7 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             )
             .unwrap_or_default()
             .into_iter()
-            .map(|hit| json!({ "index": hit.session, "snippet": hit.snippet }))
+            .map(|hit| json!({ "id": catalog.sessions[hit.session].meta.id, "snippet": hit.snippet }))
             .collect();
             Res::json(200, json!({ "matches": matches, "hits": hits }))
         }
@@ -500,13 +509,21 @@ mod tests {
 
     #[test]
     fn search_ranks_with_the_same_matcher_the_tui_uses() {
+        // Matches are session ids, not list positions: `catalog.sessions` is sorted by
+        // `Reverse(last_ts)` and periodically republished, so a position handed back here would
+        // go stale exactly like the one `/api/focus`/`/api/launch` stopped trusting.
         let res = route(&get("/api/search", "q=docker"), &portal());
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
         let matches = value["matches"].as_array().unwrap();
         assert!(!matches.is_empty());
         let catalog = fake_catalog();
-        let first = matches[0].as_u64().unwrap() as usize;
-        assert_eq!(catalog.sessions[first].meta.title, "Docker build cache");
+        let first = matches[0].as_str().unwrap();
+        let session = catalog
+            .sessions
+            .iter()
+            .find(|s| s.meta.id == first)
+            .unwrap();
+        assert_eq!(session.meta.title, "Docker build cache");
     }
 
     #[test]
@@ -516,6 +533,10 @@ mod tests {
         let hits = value["hits"].as_array().unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0]["snippet"].as_str().unwrap().contains("PINEAPPLE"));
+        let catalog = fake_catalog();
+        let id = hits[0]["id"].as_str().unwrap();
+        let session = catalog.sessions.iter().find(|s| s.meta.id == id).unwrap();
+        assert_eq!(session.meta.title, "Kubernetes ingress");
     }
 
     #[test]

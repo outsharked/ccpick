@@ -91,6 +91,20 @@ fn hostname(host: &str) -> &str {
     }
 }
 
+/// Whether a `Host` header (if any) names this server's own loopback address. Shared with
+/// `server.rs`'s SSE arm, which applies this same check before it starts streaming: SSE bypasses
+/// `route()` entirely (it never completes), so without this it would be the one endpoint the
+/// Host allowlist didn't cover.
+pub(crate) fn host_is_allowed(host: Option<&str>) -> bool {
+    match host {
+        Some(host) => {
+            let name = hostname(host);
+            name.eq_ignore_ascii_case("127.0.0.1") || name.eq_ignore_ascii_case("localhost")
+        }
+        None => true,
+    }
+}
+
 /// Whether `actual` is the page's own origin, allowing either loopback hostname on whatever
 /// port `expected` (as recorded by `Portal::set_origin`) was bound to.
 fn origin_matches(expected: &str, actual: &str) -> bool {
@@ -108,11 +122,8 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
     // reach this server carrying a `Host` header for its own public hostname, and the browser
     // treats that as same-origin (no `Origin` header at all), so this is the only check that
     // catches it.
-    if let Some(host) = req.host {
-        let name = hostname(host);
-        if !name.eq_ignore_ascii_case("127.0.0.1") && !name.eq_ignore_ascii_case("localhost") {
-            return Res::error(403, "unrecognized Host header");
-        }
+    if !host_is_allowed(req.host) {
+        return Res::error(403, "unrecognized Host header");
     }
     // The page itself carries no token: the token arrives in its URL and the script it loads
     // sends it on every call after that.

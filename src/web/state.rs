@@ -15,6 +15,12 @@ pub fn fingerprint(catalog: &Catalog) -> u64 {
     for source in &catalog.sources {
         source.name.hash(&mut hasher);
         source.env.id().hash(&mut hasher);
+        source.env_home.hash(&mut hasher);
+        source.env_config_dir.hash(&mut hasher);
+        // `LaunchSpec` doesn't derive `Hash`, so its fields are hashed individually.
+        source.launch.argv_prefix.hash(&mut hasher);
+        source.launch.env_set.hash(&mut hasher);
+        source.launch.env_remove.hash(&mut hasher);
     }
     for session in &catalog.sessions {
         session.meta.id.hash(&mut hasher);
@@ -227,6 +233,28 @@ mod tests {
         let mut source_name = fake_catalog();
         source_name.sources[0].name = "renamed source".into();
         assert_ne!(base, fingerprint(&source_name), "source name");
+
+        // These feed the displayed cwd shortening and the resume command shown to the user, so
+        // a change to any of them must be visible to a viewer even though no other field moves.
+        let mut env_home = fake_catalog();
+        env_home.sources[0].env_home = "/somewhere/else".into();
+        assert_ne!(base, fingerprint(&env_home), "source env_home");
+
+        let mut env_config_dir = fake_catalog();
+        env_config_dir.sources[0].env_config_dir = "/somewhere/else".into();
+        assert_ne!(base, fingerprint(&env_config_dir), "source env_config_dir");
+
+        let mut argv_prefix = fake_catalog();
+        argv_prefix.sources[0].launch.argv_prefix = vec!["different".into()];
+        assert_ne!(base, fingerprint(&argv_prefix), "source launch argv_prefix");
+
+        let mut env_set = fake_catalog();
+        env_set.sources[0].launch.env_set = vec![("KEY".into(), "value".into())];
+        assert_ne!(base, fingerprint(&env_set), "source launch env_set");
+
+        let mut env_remove = fake_catalog();
+        env_remove.sources[0].launch.env_remove = vec!["KEY".into()];
+        assert_ne!(base, fingerprint(&env_remove), "source launch env_remove");
 
         // first_prompt is never shown to a viewer, so it must not be in the payload.
         let mut first_prompt = fake_catalog();

@@ -12,10 +12,11 @@ pub fn sessions_payload(catalog: &Catalog, generation: u64, now_ms: i64) -> Valu
         .iter()
         .enumerate()
         .map(|(index, session)| {
-            let source_idx = session
-                .live
-                .map(|(_, s)| s)
-                .unwrap_or(session.default_source);
+            // Every row describes the launch source (override, else default), never the source
+            // a running session happens to be live under: a resume command for a session that's
+            // already resumed is not something anyone can usefully paste. `running_source` below
+            // carries the live account instead, so it isn't lost.
+            let source_idx = session.default_source;
             let source = &catalog.sources[source_idx];
             let launchable = catalog.is_launchable(source_idx);
             let cwd = session
@@ -24,6 +25,9 @@ pub fn sessions_payload(catalog: &Catalog, generation: u64, now_ms: i64) -> Valu
                 .as_deref()
                 .map(|p| shorten_home_in(p, &source.env_home, &source.env))
                 .unwrap_or_default();
+            let running_source = session
+                .live
+                .map(|(_, live_idx)| catalog.sources[live_idx].name.clone());
             json!({
                 "index": index,
                 "id": session.meta.id,
@@ -36,6 +40,7 @@ pub fn sessions_payload(catalog: &Catalog, generation: u64, now_ms: i64) -> Valu
                 "exact": exact(session.meta.last_ts),
                 "messages": session.meta.msg_count,
                 "running": session.live.is_some(),
+                "running_source": running_source,
                 "pid": session.live.map(|(pid, _)| pid),
                 "launchable": launchable,
                 "shell": source.env.shell_name(),
@@ -72,7 +77,9 @@ pub fn messages_payload(catalog: &Catalog, idx: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{fake_catalog, fake_catalog_with_foreign};
+    use crate::catalog::{build_fake, fake_catalog, fake_catalog_with_foreign};
+    use crate::model::LaunchRecord;
+    use crate::providers::fake::FakeProvider;
 
     const NOW: i64 = 10_000;
 
@@ -116,6 +123,62 @@ mod tests {
         catalog.warnings.push("something to say".into());
         let payload = sessions_payload(&catalog, 0, NOW);
         assert_eq!(payload["warnings"][0], "something to say");
+    }
+
+    #[test]
+    fn a_row_describes_the_default_source_even_while_running_elsewhere() {
+        // Two sources share a store. "one" holds the newer (but not alive) launch record, so
+        // it wins as the default source; "two" holds the alive one, so it's the live source.
+        // A row must describe "one" throughout, and only name "two" via `running_source`.
+        let mut p = FakeProvider::default();
+        p.add_source("one", "/s");
+        p.add_source("two", "/s");
+        p.add_session("/s", "x", "Shared session", 1000, 1000, &[]);
+        p.records.insert(
+            "one".into(),
+            vec![LaunchRecord {
+                pid: 1,
+                session_id: "x".into(),
+                started_at_ms: 100,
+                alive: false,
+            }],
+        );
+        p.records.insert(
+            "two".into(),
+            vec![LaunchRecord {
+                pid: 999,
+                session_id: "x".into(),
+                started_at_ms: 50,
+                alive: true,
+            }],
+        );
+        let catalog = build_fake(p);
+        // Sanity check the fixture actually exercises the interesting case.
+        let session = catalog
+            .sessions
+            .iter()
+            .find(|s| s.meta.title == "Shared session")
+            .unwrap();
+        assert_eq!(
+            session.default_source, 0,
+            "fixture: default_source is \"one\""
+        );
+        assert_eq!(session.live, Some((999, 1)), "fixture: live is \"two\"");
+
+        let payload = sessions_payload(&catalog, 0, NOW);
+        let row = payload["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["title"] == "Shared session")
+            .unwrap();
+        assert_eq!(row["source"], "one");
+        assert_eq!(row["shell"], catalog.sources[0].env.shell_name());
+        assert!(row["command"].as_str().unwrap().contains("one"));
+        assert!(!row["command"].as_str().unwrap().contains("two"));
+        assert_eq!(row["running"], true);
+        assert_eq!(row["pid"], 999);
+        assert_eq!(row["running_source"], "two");
     }
 
     #[test]

@@ -290,12 +290,33 @@ fn linux_cmdline_contains(pid: u32, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// This host's own `/proc`: every (pid, open file target) pair for a pid whose command line
-/// contains `name`, established empirically against a live `codex` process — it holds its
-/// rollout file open for as long as it runs, and `/proc/<pid>/fd/*` symlinks resolve to it.
-/// A pid or fd that can't be read (permission denied, exited mid-walk) is skipped rather than
-/// failing the whole scan: another user's processes are not ours to inspect, and that is not an
-/// error, just nothing to report for that pid.
+/// True if `pid`'s `argv[0]` basename is exactly `name` — stricter than `linux_cmdline_contains`
+/// above (which stays a substring match for its own caller, `is_running`, unchanged). This one
+/// backs `open_files`, where a substring match is too loose: every rollout path contains
+/// `.codex`, so `less ~/.codex/sessions/.../rollout-X.jsonl`, an editor with that file open, or a
+/// backup tool walking the directory would all pass a substring check on their arguments alone,
+/// with no `codex` process involved at all.
+#[cfg(target_os = "linux")]
+fn linux_argv0_basename_is(pid: u32, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let argv0 = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
+    let argv0 = String::from_utf8_lossy(argv0);
+    Path::new(argv0.as_ref())
+        .file_name()
+        .is_some_and(|f| f == name)
+}
+
+/// This host's own `/proc`: every (pid, open file target) pair for a pid whose `argv[0]`
+/// basename is exactly `name`, established empirically against a live `codex` process — it
+/// holds its rollout file open for as long as it runs, and `/proc/<pid>/fd/*` symlinks resolve
+/// to it. A pid or fd that can't be read (permission denied, exited mid-walk) is skipped rather
+/// than failing the whole scan: another user's processes are not ours to inspect, and that is
+/// not an error, just nothing to report for that pid.
 #[cfg(target_os = "linux")]
 fn linux_open_files(name: &str) -> Vec<(u32, PathBuf)> {
     let mut found = Vec::new();
@@ -306,7 +327,7 @@ fn linux_open_files(name: &str) -> Vec<(u32, PathBuf)> {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        if !linux_cmdline_contains(pid, name) {
+        if !linux_argv0_basename_is(pid, name) {
             continue;
         }
         let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
@@ -811,11 +832,43 @@ mod tests {
 
     #[test]
     fn a_host_with_no_proc_filesystem_reports_nothing() {
-        let probe = ProcessProbe::new(Env::Windows);
+        // The lister here would happily return something — the point is that a Windows host
+        // never calls it at all, so this proves the host gate, not just that the real Windows
+        // enumerator is a no-op.
+        let probe = ProcessProbe::with_open_file_lister(Env::Windows, |_name| {
+            vec![(1, PathBuf::from("/whatever"))]
+        });
         assert!(
             probe.open_files("codex").is_empty(),
             "no handle enumeration on Windows yet"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn argv0_basename_match_is_not_fooled_by_a_path_argument_that_merely_mentions_the_name() {
+        // A rollout path always contains ".codex", so a substring match on the whole command
+        // line would wrongly treat "look at this codex file" as "codex is running". Only an
+        // exact match on argv[0]'s basename should count.
+        // `sh -c '<script>' <extra args...>`: the script's own argv[0] is "sh"; the extra
+        // argument lands in the script's positional parameters, carrying the substring without
+        // touching argv[0].
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .arg("/home/me/.codex/sessions/2026/09/18/rollout-codex.jsonl")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let pid = child.id();
+        assert!(
+            linux_cmdline_contains(pid, "codex"),
+            "sanity check: the substring is indeed present in the argument"
+        );
+        assert!(!linux_argv0_basename_is(pid, "codex"));
+        assert!(linux_argv0_basename_is(pid, "sh"));
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

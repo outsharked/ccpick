@@ -118,15 +118,27 @@ impl Provider for CodexProvider {
     fn may_contain(&self, path: &Path, needle_lower: &str) -> bool {
         rollout::may_contain(path, needle_lower)
     }
-    /// A thread from any known store counts here: rollout paths are absolute and store-unique,
-    /// so matching a store's threads against the wider open-file list can't cross-contaminate
-    /// another source's sessions the way filtering by `_source` would need to guard against.
+    /// Scoped to `source`'s own store: `self.threads` accumulates entries from every store this
+    /// provider has scanned so far (Task 3's map), and two Codex sources sharing this one
+    /// provider instance is an ordinary configuration (a foreign `CODEX_HOME`, two `[[source]]`
+    /// entries, a native/foreign pair) — `catalog.rs` records only the *last* source that claims
+    /// a running session's id, so an unscoped match would silently misattribute a live session
+    /// to the wrong source and, downstream, the wrong process domain. Rollout paths are absolute
+    /// and live under the store's own config directory, so that prefix is the discriminator —
+    /// the same role `source.config_dir` plays in the Claude provider's own `launch_records`.
     fn launch_records(
         &self,
-        _source: &Source,
+        source: &Source,
         probe: &crate::process::ProcessProbe,
     ) -> Vec<LaunchRecord> {
-        let threads: Vec<db::Thread> = self.threads.read().unwrap().values().cloned().collect();
+        let threads: Vec<db::Thread> = self
+            .threads
+            .read()
+            .unwrap()
+            .values()
+            .filter(|t| t.rollout_path.starts_with(&source.config_dir))
+            .cloned()
+            .collect();
         let open = probe.open_files(AGENT);
         live::launch_records(&threads, &open)
     }
@@ -211,6 +223,60 @@ mod tests {
             title_for(&thread("", "", "first message here")),
             "first message here"
         );
+    }
+
+    fn thread_with_rollout(id: &str, rollout: &str) -> db::Thread {
+        db::Thread {
+            id: id.into(),
+            rollout_path: PathBuf::from(rollout),
+            cwd: "/home/me".into(),
+            title: "t".into(),
+            name: None,
+            first_user_message: "first".into(),
+            git_branch: None,
+            created_at_ms: 0,
+            recency_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn launch_records_are_scoped_to_the_calling_sources_own_store() {
+        // Two Codex sources sharing this one provider instance — a foreign CODEX_HOME alongside
+        // the home directory, say — each with a thread whose rollout file is running.
+        // Unscoped matching would let the second source's iteration overwrite the first's
+        // record in catalog.rs's (provider, session_id) -> source map.
+        let provider = CodexProvider::default();
+        {
+            let mut threads = provider.threads.write().unwrap();
+            let a = PathBuf::from("/home/a/.codex/sessions/rollout-a.jsonl");
+            let b = PathBuf::from("/home/b/.codex/sessions/rollout-b.jsonl");
+            threads.insert(a.clone(), thread_with_rollout("id-a", a.to_str().unwrap()));
+            threads.insert(b.clone(), thread_with_rollout("id-b", b.to_str().unwrap()));
+        }
+        let probe =
+            crate::process::ProcessProbe::with_open_file_lister(crate::env::Env::Linux, |_name| {
+                vec![
+                    (
+                        111,
+                        PathBuf::from("/home/a/.codex/sessions/rollout-a.jsonl"),
+                    ),
+                    (
+                        222,
+                        PathBuf::from("/home/b/.codex/sessions/rollout-b.jsonl"),
+                    ),
+                ]
+            });
+        let source_a = source_at("/home/a/.codex");
+        let records_a = provider.launch_records(&source_a, &probe);
+        assert_eq!(records_a.len(), 1, "only source a's own thread");
+        assert_eq!(records_a[0].session_id, "id-a");
+        assert_eq!(records_a[0].pid, 111);
+
+        let source_b = source_at("/home/b/.codex");
+        let records_b = provider.launch_records(&source_b, &probe);
+        assert_eq!(records_b.len(), 1, "only source b's own thread");
+        assert_eq!(records_b[0].session_id, "id-b");
+        assert_eq!(records_b[0].pid, 222);
     }
 
     #[test]

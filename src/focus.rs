@@ -68,6 +68,14 @@ pub fn parse_interop_socket(environ: &[u8]) -> Option<String> {
 /// Identifying the *tab* uses `marker` when the script owns the console title (the tab title
 /// follows the console title, so setting a unique value makes the tab findable and the original
 /// is put back), and otherwise falls back to matching `tab_title`.
+///
+/// That fallback can't demand the tab name equal `tab_title`, because agents decorate the
+/// terminal title they set and each does it differently: Claude prefixes a status symbol
+/// (`✳ Fix the parser`), Codex appends the user (`Fix the parser | alice`). Leading decoration is
+/// stripped, and a trailing one is allowed as long as a separator (`|`, `:`, `-`, `–`, `—`, `·`)
+/// follows the title — so the match stays anchored at the start rather than becoming a substring
+/// search that any longer title would satisfy. Ambiguity is still rejected by the caller's
+/// one-hit rule below, which does nothing rather than raise the wrong tab.
 pub fn focus_script(target: Target, marker: &str, tab_title: Option<&str>) -> String {
     let start = match target {
         Target::Console(pid) => pid.to_string(),
@@ -127,7 +135,9 @@ $isTab = New-Object System.Windows.Automation.PropertyCondition(\
 foreach ($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children, $isWindow)) {{ \
 $tabs = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $isTab); \
 $hits = @($tabs | Where-Object {{ if ($exact) {{ $_.Current.Name -like \"*$want*\" }} else {{ \
-($_.Current.Name -replace '^[^\\p{{L}}\\p{{N}}~/\\\\]+', '').Trim() -ieq $want }} }}); \
+$n = ($_.Current.Name -replace '^[^\\p{{L}}\\p{{N}}~/\\\\]+', '').Trim(); \
+($n -ieq $want) -or \
+($n -imatch ('^' + [regex]::Escape($want) + '\\s*[|:\\u00B7\\u2013\\u2014-]')) }} }}); \
 if ($hits.Count -eq 1) {{ \
 $hits[0].GetCurrentPattern(\
 [System.Windows.Automation.SelectionItemPattern]::Pattern).Select(); \
@@ -430,6 +440,30 @@ mod tests {
         let script = focus_script(Target::Inherited, "unused", Some("hello"));
         assert!(script.contains("$id=$PID"));
         assert!(script.contains("Find-Tab 'hello' $false"));
+    }
+
+    #[test]
+    fn the_tab_match_allows_decoration_on_either_side_of_the_title() {
+        // Real tab names seen in Windows Terminal: Claude renders "\u{2733} <title>", Codex
+        // renders "<title> | <user>". Matching the title exactly finds neither reliably, which
+        // is why the script normalizes the front and tolerates a separated suffix.
+        let script = focus_script(Target::Inherited, "marker", Some("Test"));
+        assert!(
+            script.contains("-replace '^[^\\p{L}\\p{N}~/\\\\]+', ''"),
+            "leading decoration must still be stripped"
+        );
+        assert!(
+            script.contains("[regex]::Escape($want)"),
+            "the title must be regex-escaped, not interpolated raw"
+        );
+        assert!(
+            script.contains("'\\s*[|:\\u00B7\\u2013\\u2014-]'"),
+            "a trailing decoration must be separator-anchored, not a bare prefix match"
+        );
+        assert!(
+            script.contains("$hits.Count -eq 1"),
+            "two candidate tabs must still select neither"
+        );
     }
 
     #[test]

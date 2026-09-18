@@ -98,9 +98,25 @@ mod tests {
         let fake_claude = tmp.path().join("claude-fake");
         fs::copy("/bin/sleep", &fake_claude).unwrap();
         let mut child = Command::new(&fake_claude).arg("30").spawn().unwrap();
-        // Give the child time to exec so /proc/<pid>/cmdline reflects the new program.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait for the exec to land rather than guessing at it: until it does, the child is
+        // still a fork of the test binary and /proc/<pid>/cmdline names the wrong program. A
+        // fixed sleep made this test fail under parallel load (issue #7).
         let pid = child.id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+            if Path::new(std::str::from_utf8(argv0).unwrap_or_default()).file_name()
+                == Some(std::ffi::OsStr::new("claude-fake"))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exec'd claude-fake"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         write_record(tmp.path(), pid, "live", 1);
         let recs = records(tmp.path());
         child.kill().unwrap();

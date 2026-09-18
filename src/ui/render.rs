@@ -851,16 +851,18 @@ mod readme_shot {
 
     fn hex(c: Color, fg: bool) -> String {
         match c {
-            Color::Reset => if fg { "#d6d6d6" } else { "#16181d" }.into(),
+            // Titles carry no colour of their own, so Reset is the terminal's plain
+            // foreground: near-white, not grey.
+            Color::Reset => if fg { "#f0f0f0" } else { "#16181d" }.into(),
             Color::Black => "#1b1d23".into(),
             Color::Red | Color::LightRed => "#e06c75".into(),
-            Color::Green | Color::LightGreen => "#89d185".into(),
+            Color::Green | Color::LightGreen => "#3fd07b".into(),
             Color::Yellow | Color::LightYellow => "#e5c07b".into(),
             Color::Blue | Color::LightBlue => "#61afef".into(),
-            Color::Magenta | Color::LightMagenta => "#c678dd".into(),
-            Color::Cyan | Color::LightCyan => "#56b6c2".into(),
-            Color::Gray => "#9aa0aa".into(),
-            Color::DarkGray => "#6b7280".into(),
+            Color::Magenta | Color::LightMagenta => "#c586e0".into(),
+            Color::Cyan | Color::LightCyan => "#4fc1d9".into(),
+            Color::Gray => "#a9b1bd".into(),
+            Color::DarkGray => "#7b8290".into(),
             Color::White => "#f3f4f6".into(),
             other => format!("{other:?}"),
         }
@@ -1043,10 +1045,10 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                     style.push_str(&format!(";background:{bg}"));
                 }
                 if cell.modifier.contains(Modifier::DIM) {
-                    style.push_str(";opacity:.55");
+                    style.push_str(";opacity:.68");
                 }
                 if cell.modifier.contains(Modifier::BOLD) {
-                    style.push_str(";font-weight:600");
+                    style.push_str(";font-weight:700");
                 }
                 body.push_str(&format!(
                     "<span style=\"{style}\">{}</span>",

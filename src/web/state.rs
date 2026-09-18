@@ -2,7 +2,6 @@
 //! when a viewer would see a difference, and the subscribers to notify when it does.
 use crate::catalog::Catalog;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -18,6 +17,7 @@ pub fn fingerprint(catalog: &Catalog) -> u64 {
     for session in &catalog.sessions {
         session.meta.id.hash(&mut hasher);
         session.meta.title.hash(&mut hasher);
+        session.meta.branch.hash(&mut hasher);
         session.meta.last_ts.hash(&mut hasher);
         session.meta.msg_count.hash(&mut hasher);
         session.meta.cwd.hash(&mut hasher);
@@ -27,10 +27,17 @@ pub fn fingerprint(catalog: &Catalog) -> u64 {
     hasher.finish()
 }
 
+/// The catalog currently being served, plus the fingerprint and generation it was published
+/// with. Kept behind one lock so a publish can never be observed half-applied: `catalog()` and
+/// `generation()` always see a fingerprint that matches the catalog it was computed from.
+struct Published {
+    catalog: Arc<Catalog>,
+    fingerprint: u64,
+    generation: u64,
+}
+
 pub struct Portal {
-    catalog: RwLock<Arc<Catalog>>,
-    generation: AtomicU64,
-    fingerprint: AtomicU64,
+    published: RwLock<Published>,
     subscribers: Mutex<Vec<Sender<u64>>>,
     token: String,
 }
@@ -39,20 +46,22 @@ impl Portal {
     pub fn new(catalog: Catalog, token: String) -> Portal {
         let fingerprint = fingerprint(&catalog);
         Portal {
-            catalog: RwLock::new(Arc::new(catalog)),
-            generation: AtomicU64::new(0),
-            fingerprint: AtomicU64::new(fingerprint),
+            published: RwLock::new(Published {
+                catalog: Arc::new(catalog),
+                fingerprint,
+                generation: 0,
+            }),
             subscribers: Mutex::new(Vec::new()),
             token,
         }
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
-        self.catalog.read().unwrap().clone()
+        self.published.read().unwrap().catalog.clone()
     }
 
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+        self.published.read().unwrap().generation
     }
 
     pub fn token(&self) -> &str {
@@ -70,11 +79,22 @@ impl Portal {
     /// the generation advance and subscribers hear about it.
     pub fn publish(&self, catalog: Catalog) -> bool {
         let next = fingerprint(&catalog);
-        *self.catalog.write().unwrap() = Arc::new(catalog);
-        if next == self.fingerprint.swap(next, Ordering::Relaxed) {
+        let mut guard = self.published.write().unwrap();
+        let changed = next != guard.fingerprint;
+        // Replace under the lock so catalog/fingerprint/generation move together as one atomic
+        // step, but drop the superseded catalog after releasing it: dropping a Catalog can be
+        // slow (it owns the whole session list), and readers shouldn't wait on that.
+        let old = std::mem::replace(&mut guard.catalog, Arc::new(catalog));
+        guard.fingerprint = next;
+        if changed {
+            guard.generation += 1;
+        }
+        let generation = guard.generation;
+        drop(guard);
+        drop(old);
+        if !changed {
             return false;
         }
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         // A closed receiver means that tab is gone; drop it rather than failing the publish.
         self.subscribers
             .lock()
@@ -112,21 +132,80 @@ mod tests {
     #[test]
     fn a_dropped_subscriber_is_forgotten_rather_than_failing_a_publish() {
         let portal = Portal::new(fake_catalog(), "token".into());
-        drop(portal.subscribe());
-        let mut changed = fake_catalog();
-        changed.sessions[0].meta.title = "Renamed".into();
-        assert!(portal.publish(changed));
+        let survivor = portal.subscribe();
+        let doomed = portal.subscribe();
+        drop(doomed);
+
+        let mut first = fake_catalog();
+        first.sessions[0].meta.title = "Renamed once".into();
+        assert!(portal.publish(first));
+
+        let mut second = fake_catalog();
+        second.sessions[0].meta.title = "Renamed twice".into();
+        assert!(portal.publish(second));
+
+        // The survivor heard both publishes...
+        assert_eq!(survivor.recv().unwrap(), 1);
+        assert_eq!(survivor.recv().unwrap(), 2);
+        // ...and the dropped one was pruned rather than left to accumulate forever.
+        assert_eq!(
+            portal.subscribers.lock().unwrap().len(),
+            1,
+            "the dropped subscriber should have been forgotten"
+        );
     }
 
     #[test]
     fn the_fingerprint_covers_what_a_viewer_can_see() {
         let base = fingerprint(&fake_catalog());
-        let mut other = fake_catalog();
-        other.sessions[0].meta.title = "Renamed".into();
-        assert_ne!(base, fingerprint(&other));
+
+        let mut title = fake_catalog();
+        title.sessions[0].meta.title = "Renamed".into();
+        assert_ne!(base, fingerprint(&title), "title");
+
+        let mut branch = fake_catalog();
+        branch.sessions[0].meta.branch = Some("feature/x".into());
+        assert_ne!(base, fingerprint(&branch), "branch");
+
+        let mut last_ts = fake_catalog();
+        last_ts.sessions[0].meta.last_ts = Some(123456);
+        assert_ne!(base, fingerprint(&last_ts), "last_ts");
+
+        let mut msg_count = fake_catalog();
+        msg_count.sessions[0].meta.msg_count += 1;
+        assert_ne!(base, fingerprint(&msg_count), "msg_count");
+
+        let mut cwd = fake_catalog();
+        cwd.sessions[0].meta.cwd = Some("/somewhere/else".into());
+        assert_ne!(base, fingerprint(&cwd), "cwd");
+
         let mut live = fake_catalog();
         live.sessions[0].live = Some((4242, 0));
-        assert_ne!(base, fingerprint(&live));
+        assert_ne!(base, fingerprint(&live), "live");
+
+        let mut default_source = fake_catalog();
+        default_source.sessions[0].default_source += 1;
+        assert_ne!(base, fingerprint(&default_source), "default_source");
+
+        let mut warnings = fake_catalog();
+        warnings.warnings.push("something went wrong".into());
+        assert_ne!(base, fingerprint(&warnings), "warnings");
+
+        let mut source_name = fake_catalog();
+        source_name.sources[0].name = "renamed source".into();
+        assert_ne!(base, fingerprint(&source_name), "source name");
+
+        // first_prompt is never shown to a viewer, so it must not be in the payload.
+        let mut first_prompt = fake_catalog();
+        first_prompt.sessions[0].meta.first_prompt = "different prompt entirely".into();
+        assert_eq!(base, fingerprint(&first_prompt), "first_prompt");
+
         assert_eq!(base, fingerprint(&fake_catalog()));
+    }
+
+    #[test]
+    fn token_returns_what_it_was_constructed_with() {
+        let portal = Portal::new(fake_catalog(), "secret-token".into());
+        assert_eq!(portal.token(), "secret-token");
     }
 }

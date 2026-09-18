@@ -13,12 +13,6 @@ Linux (x86_64, arm64) and macOS (Intel, Apple Silicon):
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/outsharked/ccpick/releases/latest/download/ccpick-installer.sh | sh
 ```
 
-Or build from source with a Rust toolchain:
-
-```bash
-cargo install --git https://github.com/outsharked/ccpick
-```
-
 Windows (PowerShell):
 
 ```powershell
@@ -110,6 +104,23 @@ config_dir = "~/.claude-work"
 ```
 
 Metadata is cached in `~/.cache/ccpick/meta.json` (`--no-cache` to bypass).
+
+## Build from source
+
+With a Rust toolchain (1.85 or newer, for edition 2024):
+
+```bash
+cargo install --git https://github.com/outsharked/ccpick
+```
+
+Or from a clone, which is also how you get a binary to run in place:
+
+```bash
+git clone https://github.com/outsharked/ccpick
+cd ccpick
+cargo build --release      # ./target/release/ccpick
+cargo install --path .     # or install it to ~/.cargo/bin
+```
 
 ## Development
 

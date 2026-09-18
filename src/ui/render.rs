@@ -837,3 +837,149 @@ mod tests {
         assert!(text.contains("WRAPPED-TAIL-MARKER"));
     }
 }
+
+#[cfg(test)]
+mod readme_shot {
+    use super::*;
+    use crate::model::{LaunchRecord, Role};
+    use crate::providers::fake::FakeProvider;
+    use crate::ui::app::App;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
+    use std::sync::Arc;
+
+    fn hex(c: Color, fg: bool) -> String {
+        match c {
+            Color::Reset => if fg { "#d6d6d6" } else { "#16181d" }.into(),
+            Color::Black => "#1b1d23".into(),
+            Color::Red | Color::LightRed => "#e06c75".into(),
+            Color::Green | Color::LightGreen => "#89d185".into(),
+            Color::Yellow | Color::LightYellow => "#e5c07b".into(),
+            Color::Blue | Color::LightBlue => "#61afef".into(),
+            Color::Magenta | Color::LightMagenta => "#c678dd".into(),
+            Color::Cyan | Color::LightCyan => "#56b6c2".into(),
+            Color::Gray => "#9aa0aa".into(),
+            Color::DarkGray => "#6b7280".into(),
+            Color::White => "#f3f4f6".into(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    /// Regenerates the source HTML for `docs/screenshot.png`; see AGENTS.md.
+    #[test]
+    #[ignore = "run explicitly with CCPICK_SHOT_HTML set"]
+    fn write_html() {
+        const NOW: i64 = 1_758_000_000_000;
+        const MIN: i64 = 60_000;
+        const HOUR: i64 = 60 * MIN;
+        const DAY: i64 = 24 * HOUR;
+        let mut p = FakeProvider::default();
+        p.add_source("work", "/s");
+        p.add_source("personal", "/t");
+        p.add_session(
+            "/s",
+            "a1",
+            "Flaky login test on CI",
+            NOW - 3 * HOUR,
+            NOW - 12 * MIN,
+            &[
+                (Role::User, "the login test fails about one run in five"),
+                (
+                    Role::Assistant,
+                    "It races the session cookie write. Awaiting the redirect fixes it.",
+                ),
+            ],
+        );
+        p.add_session(
+            "/s",
+            "b2",
+            "Postgres connection pool sizing",
+            NOW - 2 * DAY,
+            NOW - 26 * HOUR,
+            &[],
+        );
+        p.add_session(
+            "/t",
+            "c3",
+            "Blog post about the release",
+            NOW - 6 * DAY,
+            NOW - 5 * DAY,
+            &[],
+        );
+        p.add_session(
+            "/s",
+            "d4",
+            "Terraform state migration",
+            NOW - 9 * DAY,
+            NOW - 8 * DAY,
+            &[],
+        );
+        p.set_cwd("/s", "a1", Some("~/code/web-app"));
+        p.set_cwd("/s", "b2", Some("~/code/web-app"));
+        p.set_cwd("/t", "c3", Some("~/notes"));
+        p.set_cwd("/s", "d4", Some("~/code/infra"));
+        p.records.insert(
+            "work".into(),
+            vec![LaunchRecord {
+                pid: 48120,
+                session_id: "a1".into(),
+                started_at_ms: NOW - 3 * HOUR,
+                alive: true,
+            }],
+        );
+        let mut catalog = crate::catalog::build_fake(p);
+        // The preview labels assistant turns with the agent name; show the real one.
+        for session in &mut catalog.sessions {
+            session.meta.agent = "claude".into();
+        }
+        let mut app = App::new(Arc::new(catalog), "");
+        let (w, h) = (104u16, 17u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, NOW)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let mut body = String::new();
+        for y in 0..h {
+            for x in 0..w {
+                let cell = &buffer[(x, y)];
+                let reversed = cell.modifier.contains(Modifier::REVERSED);
+                let (mut fg, mut bg) = (hex(cell.fg, true), hex(cell.bg, false));
+                if reversed {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let mut style = format!("color:{fg}");
+                if bg != "#16181d" {
+                    style.push_str(&format!(";background:{bg}"));
+                }
+                if cell.modifier.contains(Modifier::DIM) {
+                    style.push_str(";opacity:.55");
+                }
+                if cell.modifier.contains(Modifier::BOLD) {
+                    style.push_str(";font-weight:600");
+                }
+                body.push_str(&format!(
+                    "<span style=\"{style}\">{}</span>",
+                    esc(cell.symbol())
+                ));
+            }
+            body.push('\n');
+        }
+        let html = format!(
+            "<!doctype html><meta charset=utf-8><style>\
+html,body{{margin:0;background:#16181d}}\
+pre{{margin:0;padding:18px 20px;font:15px/1.35 'Cascadia Mono','Consolas',monospace;\
+background:#16181d;color:#d6d6d6;display:inline-block;white-space:pre}}\
+</style><pre>{body}</pre>"
+        );
+        let out =
+            std::env::var("CCPICK_SHOT_HTML").unwrap_or_else(|_| "target/screenshot.html".into());
+        std::fs::write(out, html).unwrap();
+    }
+}

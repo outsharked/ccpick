@@ -89,6 +89,18 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
   full-text search < 500 ms. Re-measure (`time mise dev -- --list <word>`) after touching
   scanning or search.
 
+## The README screenshot
+
+`docs/screenshot.png` is generated, not hand-made, so it always matches the real rendering and
+contains no real session data:
+
+```bash
+CCPICK_SHOT_HTML=/tmp/shot.html cargo test --lib readme_shot -- --ignored
+```
+
+That writes the TUI's own `TestBackend` render (with colours) as HTML. Screenshot it with any
+headless browser at 2x scale, then trim and pad the result before committing it.
+
 ## Commits and docs
 
 - Commit only when asked; never push, tag, or publish a release unless asked.

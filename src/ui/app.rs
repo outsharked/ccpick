@@ -87,6 +87,8 @@ pub struct App {
     pub(crate) preview_layout: Option<super::render::PreviewLayout>,
     pub status: Option<String>,
     pub dialog: Option<ResumeDialog>,
+    /// Esc asks before quitting, so a stray Esc while typing doesn't drop the session list.
+    pub confirm_quit: bool,
     source_override: HashMap<usize, usize>,
     text_hits: Vec<TextHit>,
     text_generation: u64,
@@ -111,6 +113,7 @@ impl App {
             preview_layout: None,
             status: None,
             dialog: None,
+            confirm_quit: false,
             source_override: HashMap::new(),
             text_hits: Vec::new(),
             text_generation: 0,
@@ -429,13 +432,34 @@ impl App {
         }
     }
 
+    /// While the quit prompt is up, only "yes" quits; Ctrl-C still quits outright and every
+    /// other key dismisses the prompt without acting, so a typo can't resume the wrong session.
+    fn handle_confirm_quit_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Char('c'), true) => Action::Quit,
+            (KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter, false) => Action::Quit,
+            _ => {
+                self.confirm_quit = false;
+                Action::None
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if self.confirm_quit {
+            return self.handle_confirm_quit_key(key);
+        }
         if self.dialog.is_some() {
             return self.handle_dialog_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, ctrl) {
-            (KeyCode::Esc, _) | (KeyCode::Char('c'), true) => Action::Quit,
+            (KeyCode::Char('c'), true) => Action::Quit,
+            (KeyCode::Esc, _) => {
+                self.confirm_quit = true;
+                Action::None
+            }
             (KeyCode::Enter, _) => self.enter(),
             (KeyCode::Tab, _) => {
                 self.focus = match self.focus {
@@ -692,7 +716,7 @@ mod tests {
     #[test]
     fn native_session_in_wsl_host_still_launches() {
         let mut a = App::new(Arc::new(crate::catalog::fake_catalog_with_foreign()), "");
-        a.selected = 0; // session "n", cwd /tmp
+        a.selected = 0; // session "n", whose cwd exists
         assert!(matches!(
             a.handle_key(key(KeyCode::Enter)),
             Action::Launch(_)
@@ -796,7 +820,9 @@ mod tests {
         assert_eq!(a.focus, Focus::Preview);
         a.handle_key(key(KeyCode::Up));
         assert_eq!(a.selected, 0);
-        assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::Quit);
+        // Esc asks first; Ctrl-C doesn't.
+        assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.confirm_quit);
         assert_eq!(a.handle_key(ctrl('c')), Action::Quit);
     }
 
@@ -879,6 +905,48 @@ mod tests {
         assert_eq!(a.selected, 3);
         a.handle_key(key(KeyCode::Home));
         assert_eq!(a.selected, 0);
+    }
+
+    #[test]
+    fn esc_asks_before_quitting() {
+        let mut a = app("");
+        assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.confirm_quit);
+        assert_eq!(a.handle_key(key(KeyCode::Char('y'))), Action::Quit);
+
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Esc));
+        assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::Quit);
+    }
+
+    #[test]
+    fn anything_else_cancels_the_quit_prompt_without_acting() {
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Esc));
+        // Enter is the one key that could resume a session by accident, so the cancelling key
+        // must not fall through to the normal handler.
+        assert_eq!(a.handle_key(key(KeyCode::Char('n'))), Action::None);
+        assert!(!a.confirm_quit);
+        assert_eq!(
+            a.query, "",
+            "the cancelling key is not typed into the query"
+        );
+
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Esc));
+        assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(!a.confirm_quit);
+    }
+
+    #[test]
+    fn the_quit_prompt_takes_priority_over_the_resume_dialog() {
+        let mut a = foreign_app();
+        a.handle_key(key(KeyCode::Enter));
+        assert!(a.dialog.is_some());
+        a.confirm_quit = true;
+        assert_eq!(a.handle_key(key(KeyCode::Char('c'))), Action::None);
+        assert!(!a.confirm_quit);
+        assert!(a.dialog.is_some(), "the dialog is left alone");
     }
 
     #[test]

@@ -5,6 +5,25 @@ multiple [ccs](https://github.com/kaitranntt/ccs) accounts, `~/.claude`, `$CLAUD
 or any directory you configure. It doesn't manage sessions; it finds one and hands off to the
 right launcher.
 
+```
+┌ ccpick ─ 4 sessions ─ 2 sources ─ 1 running ─────────────────────────────────────────────────────────┐
+│> ▏                                                                                                   │
+│ Sessions                                    │ Conversation                                           │
+│● Flaky login test on CI                     │ ~/code/web-app · - · work                              │
+│  ~/code/web-app · work · 1:08 AM [running]  │ 2 msgs · started Mon Sep 15, 2025 10:20 PM · last Tue  │
+│  Postgres connection pool sizing            │ Sep 16, 2025 1:08 AM                                   │
+│  ~/code/web-app · work · Last Sunday        │ a1                                                     │
+│  Blog post about the release                │ ────────────────────────────────────────────────────── │
+│  ~/notes · personal · Last Thursday         │ you: the login test fails about one run in five        │
+│  Terraform state migration                  │                                                        │
+│  ~/code/infra · work · Last week            │ claude: It races the session cookie write. Awaiting the│
+│                                             │ redirect fixes it.                                     │
+│                                             │                                                        │
+│                                             │                                                        │
+│ ↵ resume  → preview  ^A source  ^R running only  ^S sort  esc quit                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Install
 
 Linux (x86_64, arm64) and macOS (Intel, Apple Silicon):
@@ -44,7 +63,7 @@ conversation text appear below a divider shortly after.
 | `↑` / `↓` | Move selection (list) or scroll one line (preview) |
 | `PgUp` / `PgDn` | Move 10 sessions (list) or scroll a page (preview) |
 | `Home` / `End` | First/last session (list) or top/bottom of the conversation (preview) |
-| `Esc` / `Ctrl-C` | Quit |
+| `Esc` | Quit, after a confirmation prompt (`Ctrl-C` quits outright) |
 
 ## Sources
 

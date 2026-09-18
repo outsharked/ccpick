@@ -131,7 +131,16 @@ mod tests {
         let all = list_tsv(&c, "");
         assert_eq!(all.lines().count(), 4);
         let row: Vec<&str> = all.lines().nth(2).unwrap().split('\t').collect();
-        assert_eq!(&row[1..], &["two", "4242", "c", "/tmp", "Running thing"]);
+        assert_eq!(
+            &row[1..],
+            &[
+                "two",
+                "4242",
+                "c",
+                env!("CARGO_MANIFEST_DIR"),
+                "Running thing"
+            ]
+        );
 
         let text = list_tsv(&c, "pineapple");
         assert_eq!(text.lines().count(), 1);

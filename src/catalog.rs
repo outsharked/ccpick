@@ -476,7 +476,7 @@ mod tests {
         );
         assert_eq!(
             c.host_cwd(n, c.sessions[n].default_source),
-            Some(PathBuf::from("/tmp"))
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
         );
     }
 

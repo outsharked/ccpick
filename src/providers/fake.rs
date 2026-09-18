@@ -83,7 +83,10 @@ impl FakeProvider {
             id: id.into(),
             path: path.clone(),
             title: title.into(),
-            cwd: Some(PathBuf::from("/tmp")),
+            // A directory that exists wherever the tests run, on every platform: Enter only
+            // launches when the session's cwd is still there, and "/tmp" is not a directory on
+            // Windows.
+            cwd: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
             branch: None,
             first_ts: Some(first_ts),
             last_ts: Some(last_ts),

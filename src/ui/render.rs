@@ -85,6 +85,53 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64) {
     if app.dialog.is_some() {
         draw_dialog(frame, app);
     }
+    if app.confirm_quit {
+        draw_quit_confirm(frame);
+    }
+}
+
+fn draw_quit_confirm(frame: &mut Frame) {
+    draw_modal(
+        frame,
+        " Quit ccpick ",
+        vec![
+            Line::from("Quit ccpick?"),
+            Line::from(""),
+            Line::from(" y / ↵ quit   any other key cancel").dim(),
+        ],
+        40,
+    );
+}
+
+/// A centered, bordered box over the whole frame, sized to its wrapped contents.
+fn draw_modal(frame: &mut Frame, title: &str, lines: Vec<Line<'static>>, max_width: u16) {
+    let area = frame.area();
+    let width = area
+        .width
+        .saturating_sub(4)
+        .clamp(20, max_width)
+        .min(area.width);
+    let inner_width = width.saturating_sub(4).max(1);
+    let content_height = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(inner_width) as u16;
+    let height = content_height.saturating_add(2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title.to_string())
+                .padding(Padding::horizontal(1)),
+        ),
+        rect,
+    );
 }
 
 fn draw_dialog(frame: &mut Frame, app: &App) {
@@ -92,8 +139,6 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
         return;
     };
     let source = &app.catalog.sources[dialog.source];
-    let area = frame.area();
-    let width = area.width.saturating_sub(4).clamp(20, 90).min(area.width);
     let mut lines = vec![
         Line::from(format!(
             "This session lives in {}. Paste into {}:",
@@ -121,30 +166,15 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
         )));
     }
     lines.push(Line::from(" c copy   ^A source   esc close").dim());
-    let inner_width = width.saturating_sub(4).max(1);
-    let content_height = Paragraph::new(lines.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(inner_width) as u16;
-    let height = content_height.saturating_add(2).min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
-                    " Resume in {} · {} ",
-                    source.env.display_name(),
-                    source.name
-                ))
-                .padding(Padding::horizontal(1)),
+    draw_modal(
+        frame,
+        &format!(
+            " Resume in {} · {} ",
+            source.env.display_name(),
+            source.name
         ),
-        rect,
+        lines,
+        90,
     );
 }
 
@@ -547,6 +577,18 @@ mod tests {
         panic!("{needle:?} not on screen");
     }
 
+    /// The whole screen as text, one line per row.
+    fn dump(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn draw_to(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| draw(f, app, 10_000)).unwrap();
@@ -699,7 +741,8 @@ mod tests {
     fn list_dims_rows_whose_project_dir_is_missing() {
         let mut app = App::new(Arc::new(fake_catalog()), "");
         let buffer = draw_to(&mut app, 100, 30);
-        // Session "d" ("Old notes") has cwd /nonexistent/ccpick-test; session "a" has /tmp.
+        // Session "d" ("Old notes") has cwd /nonexistent/ccpick-test; session "a" has one
+        // that exists.
         assert!(
             buffer[find(&buffer, "Old notes")]
                 .modifier
@@ -710,6 +753,16 @@ mod tests {
                 .modifier
                 .contains(Modifier::DIM)
         );
+    }
+
+    #[test]
+    fn renders_the_quit_confirmation_over_everything_else() {
+        let mut app = App::new(Arc::new(fake_catalog()), "");
+        app.confirm_quit = true;
+        let buffer = draw_to(&mut app, 100, 30);
+        let text = dump(&buffer);
+        assert!(text.contains("Quit ccpick?"));
+        assert!(text.contains("y / ↵ quit"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use ratatui::widgets::{
 const LIST_HELP: &str = " ↵ resume  → preview  ^A source  ^R running only  ^S sort  esc quit";
 const PREVIEW_HELP: &str = " ← sessions  ↑↓ line  PgUp/PgDn page  Home/End  ↵ resume  esc quit";
 
-pub fn highlight(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
+pub fn highlight_spans(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
     let needle = query.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return vec![Span::styled(text.to_string(), base)];
@@ -181,56 +181,6 @@ fn draw_dialog(frame: &mut Frame, app: &App) {
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64) {
     let catalog = app.catalog.clone();
     let rows = app.rows.clone();
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|row| match row {
-            Row::Divider => ListItem::new(Line::from("── in conversation text ──").dim()),
-            Row::Session { idx, snippet } => {
-                let idx = *idx;
-                let s = &catalog.sessions[idx];
-                let source_idx = app.launch_source(idx);
-                let source = &catalog.sources[source_idx];
-                let marker = if s.live.is_some() { "● " } else { "  " };
-                let title = Line::from(vec![
-                    Span::styled(marker, Style::new().fg(Color::Green)),
-                    Span::styled(
-                        s.meta.title.clone(),
-                        Style::new().add_modifier(Modifier::BOLD),
-                    ),
-                ]);
-                let second = match snippet {
-                    Some(text) => Line::from(highlight(
-                        &format!("  {text}"),
-                        &app.query,
-                        Style::new().dim(),
-                    )),
-                    None => {
-                        let cwd = s
-                            .meta
-                            .cwd
-                            .as_deref()
-                            .map(|p| shorten_home_in(p, &source.env_home, &source.env))
-                            .unwrap_or_else(|| "?".into());
-                        let mut detail = format!(
-                            "  {cwd} · {} · {}",
-                            source.name,
-                            friendly(now_ms, s.meta.last_ts)
-                        );
-                        if s.live.is_some() {
-                            detail.push_str(" [running]");
-                        }
-                        Line::from(detail).dim()
-                    }
-                };
-                let item = ListItem::new(vec![title, second]);
-                if app.cwd_missing(idx, source_idx) {
-                    item.style(Style::new().add_modifier(Modifier::DIM))
-                } else {
-                    item
-                }
-            }
-        })
-        .collect();
     let block = Block::default().borders(Borders::RIGHT);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -241,17 +191,88 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, now_ms: i64) {
         title_area,
     );
 
+    // The selection is drawn onto the row's own spans rather than by the list's highlight
+    // style, so it starts after the running marker and still runs to the pane's edge.
     let highlight = match app.focus {
         Focus::List => Style::new().add_modifier(Modifier::REVERSED),
         Focus::Preview => Style::new().bg(Color::DarkGray),
     };
-    let list = List::new(items).highlight_style(highlight);
+    let selected_row = app.selected_session().map(|_| app.selected);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(row_idx, row)| match row {
+            Row::Divider => ListItem::new(Line::from("── in conversation text ──").dim()),
+            Row::Session { idx, snippet } => {
+                let idx = *idx;
+                let s = &catalog.sessions[idx];
+                let source_idx = app.launch_source(idx);
+                let source = &catalog.sources[source_idx];
+                let selected = Some(row_idx) == selected_row;
+                let sel = |style: Style| {
+                    if selected {
+                        style.patch(highlight)
+                    } else {
+                        style
+                    }
+                };
+                // Fills the rest of the row so the selection is a solid band, without
+                // touching the two marker columns in front of it.
+                let fill = |mut line: Line<'static>| {
+                    if selected {
+                        let pad = (list_area.width as usize).saturating_sub(line.width());
+                        line.push_span(Span::styled(" ".repeat(pad), highlight));
+                    }
+                    line
+                };
+                let marker = if s.live.is_some() { "● " } else { "  " };
+                let title = Line::from(vec![
+                    Span::styled(marker, Style::new().fg(Color::Green)),
+                    Span::styled(
+                        s.meta.title.clone(),
+                        sel(Style::new().add_modifier(Modifier::BOLD)),
+                    ),
+                ]);
+                // The second line is indented to sit under the title, past the marker.
+                let mut spans = vec![Span::raw("  ")];
+                match snippet {
+                    Some(text) => spans.extend(
+                        highlight_spans(text, &app.query, Style::new().dim())
+                            .into_iter()
+                            .map(|span| Span::styled(span.content, sel(span.style))),
+                    ),
+                    None => {
+                        let cwd = s
+                            .meta
+                            .cwd
+                            .as_deref()
+                            .map(|p| shorten_home_in(p, &source.env_home, &source.env))
+                            .unwrap_or_else(|| "?".into());
+                        let mut detail = format!(
+                            "{cwd} · {} · {}",
+                            source.name,
+                            friendly(now_ms, s.meta.last_ts)
+                        );
+                        if s.live.is_some() {
+                            detail.push_str(" [running]");
+                        }
+                        spans.push(Span::styled(detail, sel(Style::new().dim())));
+                    }
+                }
+                let item = ListItem::new(vec![fill(title), fill(Line::from(spans))]);
+                if app.cwd_missing(idx, source_idx) {
+                    item.style(Style::new().add_modifier(Modifier::DIM))
+                } else {
+                    item
+                }
+            }
+        })
+        .collect();
     let mut state =
         ListState::default().with_selected(app.selected_session().map(|_| app.selected));
-    frame.render_stateful_widget(list, list_area, &mut state);
+    frame.render_stateful_widget(List::new(items), list_area, &mut state);
 }
 
-/// A pane title: bright when its pane has focus, dimmed otherwise.
 fn pane_title(text: &str, focused: bool) -> Line<'static> {
     let style = if focused {
         Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -467,7 +488,7 @@ fn message_lines(agent: &str, query: &str, message: &Message) -> Vec<Line<'stati
                 Style::new().fg(color).add_modifier(Modifier::BOLD),
             ));
         }
-        spans.extend(highlight(text_line, query, Style::new()));
+        spans.extend(highlight_spans(text_line, query, Style::new()));
         lines.push(Line::from(spans));
     }
     lines.push(Line::from(""));
@@ -515,10 +536,10 @@ mod tests {
 
     #[test]
     fn highlight_splits_matches() {
-        let spans = highlight("Fix DOCKER now", "docker", Style::new());
+        let spans = highlight_spans("Fix DOCKER now", "docker", Style::new());
         let parts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(parts, vec!["Fix ", "DOCKER", " now"]);
-        assert_eq!(highlight("abc", "", Style::new()).len(), 1);
+        assert_eq!(highlight_spans("abc", "", Style::new()).len(), 1);
     }
 
     fn msg(text: &str) -> Message {
@@ -619,6 +640,20 @@ mod tests {
         let cell = &buffer[find(&buffer, "Docker build cache")];
         assert!(!cell.modifier.contains(Modifier::REVERSED));
         assert_eq!(cell.bg, Color::DarkGray);
+    }
+
+    #[test]
+    fn the_selection_starts_after_the_running_marker_and_runs_to_the_edge() {
+        let mut app = App::new(Arc::new(fake_catalog()), "");
+        let buffer = draw_to(&mut app, 100, 30);
+        let (x, y) = find(&buffer, "Docker build cache");
+        assert!(buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+        // The running marker sits in the two columns before the title.
+        assert!(!buffer[(x - 1, y)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(x - 2, y)].modifier.contains(Modifier::REVERSED));
+        // The band runs on past the title to the pane's edge.
+        let end = x + "Docker build cache".chars().count() as u16;
+        assert!(buffer[(end, y)].modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -853,7 +888,7 @@ mod readme_shot {
         match c {
             // Titles carry no colour of their own, so Reset is the terminal's plain
             // foreground: near-white, not grey.
-            Color::Reset => if fg { "#f0f0f0" } else { "#16181d" }.into(),
+            Color::Reset => if fg { "#ffffff" } else { "#16181d" }.into(),
             Color::Black => "#1b1d23".into(),
             Color::Red | Color::LightRed => "#e06c75".into(),
             Color::Green | Color::LightGreen => "#3fd07b".into(),
@@ -1060,7 +1095,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
         let html = format!(
             "<!doctype html><meta charset=utf-8><style>\
 html,body{{margin:0;background:#16181d}}\
-pre{{margin:0;padding:18px 20px;font:15px/1.35 'Cascadia Mono','Consolas',monospace;\
+pre{{margin:0;padding:11px 12px;font:9px/1.32 'Cascadia Mono','Consolas',monospace;\
 background:#16181d;color:#d6d6d6;display:inline-block;white-space:pre}}\
 </style><pre>{body}</pre>"
         );

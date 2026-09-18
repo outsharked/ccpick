@@ -61,7 +61,7 @@ conversation text appear below a divider shortly after.
 | `↑` / `↓` | Move selection (list) or scroll one line (preview) |
 | `PgUp` / `PgDn` | Move 10 sessions (list) or scroll a page (preview) |
 | `Home` / `End` | First/last session (list) or top/bottom of the conversation (preview) |
-| `Esc` | Quit, after a confirmation prompt (`Ctrl-C` quits outright) |
+| `Esc` | Clear the search; with nothing to clear, quit after a confirmation (`Ctrl-C` quits outright) |
 
 ## Sources
 

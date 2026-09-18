@@ -456,6 +456,11 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, ctrl) {
             (KeyCode::Char('c'), true) => Action::Quit,
+            // Esc backs out one step at a time: first the search, then ccpick itself.
+            (KeyCode::Esc, _) if !self.query.is_empty() => {
+                self.query.clear();
+                self.query_changed()
+            }
             (KeyCode::Esc, _) => {
                 self.confirm_quit = true;
                 Action::None
@@ -905,6 +910,23 @@ mod tests {
         assert_eq!(a.selected, 3);
         a.handle_key(key(KeyCode::Home));
         assert_eq!(a.selected, 0);
+    }
+
+    #[test]
+    fn esc_clears_the_search_before_it_offers_to_quit() {
+        let mut a = app("docker");
+        assert_eq!(
+            a.handle_key(key(KeyCode::Esc)),
+            Action::Search(String::new())
+        );
+        assert_eq!(a.query, "");
+        assert!(
+            !a.confirm_quit,
+            "clearing the search doesn't also offer to quit"
+        );
+        // Now that there's nothing to clear, Esc asks.
+        assert_eq!(a.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(a.confirm_quit);
     }
 
     #[test]

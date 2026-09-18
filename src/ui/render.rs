@@ -917,9 +917,17 @@ mod readme_shot {
         const MIN: i64 = 60_000;
         const HOUR: i64 = 60 * MIN;
         const DAY: i64 = 24 * HOUR;
+        // Rows whose project directory is gone are dimmed, so the sample homes have to exist
+        // on disk or the whole list renders washed out.
+        let home = tempfile::tempdir().unwrap();
+        for dir in ["code/web-app", "code/infra", "code/scratch", "notes"] {
+            std::fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        let home_str = home.path().to_string_lossy().to_string();
+        let path = |rel: &str| format!("{home_str}/{rel}");
         let mut p = FakeProvider::default();
-        p.add_source("work", "/s");
-        p.add_source("personal", "/t");
+        p.add_source_in("work", "/s", crate::env::Env::Linux, &home_str);
+        p.add_source_in("personal", "/t", crate::env::Env::Linux, &home_str);
         p.add_session(
             "/s",
             "a1",
@@ -940,7 +948,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "b2",
                 "Postgres connection pool sizing",
-                "~/code/web-app",
+                "code/web-app",
                 2 * DAY,
                 26 * HOUR,
             ),
@@ -948,7 +956,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "c3",
                 "Rate limiting the public API",
-                "~/code/web-app",
+                "code/web-app",
                 2 * DAY,
                 2 * DAY,
             ),
@@ -956,7 +964,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/t",
                 "d4",
                 "Blog post about the release",
-                "~/notes",
+                "notes",
                 6 * DAY,
                 3 * DAY,
             ),
@@ -964,7 +972,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "e5",
                 "Terraform state migration",
-                "~/code/infra",
+                "code/infra",
                 9 * DAY,
                 4 * DAY,
             ),
@@ -972,7 +980,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "f6",
                 "Flaky DNS in the staging cluster",
-                "~/code/infra",
+                "code/infra",
                 9 * DAY,
                 5 * DAY,
             ),
@@ -980,7 +988,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/t",
                 "g7",
                 "Weekend photo import script",
-                "~/code/scratch",
+                "code/scratch",
                 11 * DAY,
                 6 * DAY,
             ),
@@ -988,7 +996,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "h8",
                 "Upgrade the build to the 2024 edition",
-                "~/code/web-app",
+                "code/web-app",
                 14 * DAY,
                 8 * DAY,
             ),
@@ -996,7 +1004,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "i9",
                 "Cache invalidation on deploy",
-                "~/code/web-app",
+                "code/web-app",
                 16 * DAY,
                 12 * DAY,
             ),
@@ -1004,7 +1012,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/t",
                 "j10",
                 "Home server backup rotation",
-                "~/code/scratch",
+                "code/scratch",
                 20 * DAY,
                 15 * DAY,
             ),
@@ -1012,7 +1020,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "k11",
                 "Postmortem for the checkout outage",
-                "~/notes",
+                "notes",
                 24 * DAY,
                 20 * DAY,
             ),
@@ -1020,7 +1028,7 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/s",
                 "l12",
                 "Split the monolith test suite",
-                "~/code/web-app",
+                "code/web-app",
                 30 * DAY,
                 26 * DAY,
             ),
@@ -1028,16 +1036,16 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 "/t",
                 "m13",
                 "Reading list cleanup",
-                "~/notes",
+                "notes",
                 40 * DAY,
                 33 * DAY,
             ),
         ];
         for (store, id, title, cwd, first, last) in sessions {
             p.add_session(store, id, title, NOW - first, NOW - last, &[]);
-            p.set_cwd(store, id, Some(cwd));
+            p.set_cwd(store, id, Some(&path(cwd)));
         }
-        p.set_cwd("/s", "a1", Some("~/code/web-app"));
+        p.set_cwd("/s", "a1", Some(&path("code/web-app")));
         p.records.insert(
             "work".into(),
             vec![

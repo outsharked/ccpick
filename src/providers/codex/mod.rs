@@ -240,7 +240,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("state_5.sqlite");
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch("CREATE TABLE threads (id TEXT)").unwrap();
+        conn.execute_batch("CREATE TABLE threads (id TEXT)")
+            .unwrap();
         drop(conn);
 
         let provider = CodexProvider::default();

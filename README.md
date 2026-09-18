@@ -12,8 +12,9 @@ it finds one and hands off to the right launcher.
   can be resumed through any of them (`Ctrl-A` picks).
 - **Search as you type.** Titles, project paths, branches and first prompts filter instantly;
   matches inside the conversations themselves arrive a moment later, below a divider.
-- **Shows what's running.** Live Claude sessions are marked, with their pid, so you never resume
-  one twice. Codex sessions don't have this yet — see [Codex](#codex) below.
+- **Shows what's running.** Live sessions for both agents are marked, with their pid, so you
+  never resume one twice. On Windows itself (not WSL), only Claude sessions get this treatment —
+  see [Codex](#codex) below.
 - **Enter does the right thing.** A stopped session resumes through its own launcher; a running
   one brings its terminal to the front instead, switching to the right tab.
 - **Reads across Windows and WSL.** Each side lists the other's sessions, and running state is
@@ -125,17 +126,28 @@ A thread's title, cwd and other metadata are cached against its rollout file's s
 same as Claude's. Renaming a thread in Codex without adding a new message to it won't update
 the title here until the next message arrives, or you run with `--no-cache`.
 
-Codex sessions aren't yet detected as running — that's a follow-up, not implemented here — so
-Enter always resumes them rather than switching to a live terminal.
+Running Codex sessions are detected by walking this host's own `/proc`: a live `codex` process
+holds its rollout file open, so a match there means it's running. That works on Linux and inside
+WSL. It does not work on a Windows host, which has no `/proc` and no handle enumeration to stand
+in for it — on Windows, Codex sessions always resume rather than switching to a live terminal,
+even one that's actually running. Unlike Claude's pid-file records, this doesn't reach across
+the Windows/WSL boundary either: a WSL host only sees Codex sessions running in that same distro,
+not ones on the Windows side.
 
 ## Windows and WSL
 
 On a Windows machine with WSL, ccpick also lists the other side's sessions:
 
-- In WSL, Windows users' Claude Code data under `/mnt/c/Users/<user>` appears as `win:<name>` sources.
+- In WSL, Windows users' Claude Code and Codex data under `/mnt/c/Users/<user>` appears as
+  `win:<name>` sources.
 - On Windows, sessions in *running* WSL distros appear as `wsl:<name>` (or `<distro>:<name>` with several distros). Stopped distros aren't started.
 
-Those sessions are searchable like any other, and running ones are shown as running whichever side ccpick is on. Pressing Enter on a session that isn't running opens a dialog with the command to paste into a shell on the other side (`c` copies it), since ccpick doesn't launch across the boundary.
+Those sessions are searchable like any other. For Claude, running ones are shown as running
+whichever side ccpick is on — that's what the console-title and interop-socket matching below
+does. Codex's running detection (see [Codex](#codex) above) doesn't reach across this boundary:
+a Codex session only shows as running when ccpick is on the same side it's running on. Pressing
+Enter on a session that isn't running opens a dialog with the command to paste into a shell on
+the other side (`c` copies it), since ccpick doesn't launch across the boundary.
 
 Pressing Enter on a session that is *running* brings its terminal to the front instead of
 resuming it, switching to the right tab where the terminal supports tabs (Windows Terminal does).

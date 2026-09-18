@@ -93,10 +93,10 @@ benefit at this concurrency. A handful of local tabs does not need an event loop
 | GET | `/` | the page (token arrives as `?t=`) |
 | GET | `/api/sessions` | list, warnings, generation |
 | GET | `/api/search?q=` | ranked session ids plus conversation hits |
-| GET | `/api/messages?id=` | transcript for the preview pane |
+| GET | `/api/messages?id=&agent=` | transcript for the preview pane |
 | GET | `/api/events` | SSE: a generation number |
-| POST | `/api/launch` | resume a session in a new terminal |
-| POST | `/api/focus` | raise a running session's terminal |
+| POST | `/api/launch` | resume a session in a new terminal (body: `{id, agent}`) |
+| POST | `/api/focus` | raise a running session's terminal (body: `{id, agent}`) |
 
 Search runs server-side so the nucleo fuzzy match over metadata and the rayon
 full-text scan over transcripts are the same code the TUI runs. Ranking cannot drift

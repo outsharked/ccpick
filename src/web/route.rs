@@ -3,6 +3,7 @@
 use crate::web::json::{messages_payload, sessions_payload};
 use crate::web::state::Portal;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 pub struct Req<'a> {
     pub method: &'a str,
@@ -106,8 +107,11 @@ pub(crate) fn host_is_allowed(host: Option<&str>) -> bool {
 }
 
 /// Whether `actual` is the page's own origin, allowing either loopback hostname on whatever
-/// port `expected` (as recorded by `Portal::set_origin`) was bound to.
-fn origin_matches(expected: &str, actual: &str) -> bool {
+/// port `expected` (as recorded by `Portal::set_origin`) was bound to. `pub(crate)` because
+/// `server.rs`'s SSE arm applies this same check before it starts streaming: SSE bypasses
+/// `route()` entirely (it never completes), so without this it would be the one endpoint the
+/// Origin check didn't cover.
+pub(crate) fn origin_matches(expected: &str, actual: &str) -> bool {
     match expected.rsplit_once(':') {
         Some((_, port)) => {
             actual.eq_ignore_ascii_case(&format!("http://127.0.0.1:{port}"))
@@ -115,6 +119,27 @@ fn origin_matches(expected: &str, actual: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Compares two byte strings without short-circuiting on the first difference (or on a length
+/// mismatch), so neither how many leading bytes matched nor whether the lengths differ is
+/// observable via timing. The token itself is opaque to other users, but its host process's
+/// argv is not: `/proc/<pid>/cmdline` is world-readable on Linux, wider than the `!=` comparison
+/// this replaces ever assumed (see the design doc's "Security" section) — worth getting right
+/// even though the length of a 128-bit hex token is not itself a secret.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff: u8 = if a.len() == b.len() { 0 } else { 1 };
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
+/// Whether a request's token matches the portal's, via `constant_time_eq`. `pub(crate)` so
+/// `server.rs`'s SSE arm (which never reaches `route()`) can apply the same comparison rather
+/// than its own `!=`.
+pub(crate) fn tokens_match(provided: Option<&str>, expected: &str) -> bool {
+    provided.is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()))
 }
 
 pub fn route(req: &Req, portal: &Portal) -> Res {
@@ -159,7 +184,7 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
     {
         return Res::error(403, "cross-origin requests are refused");
     }
-    if req.token != Some(portal.token()) {
+    if !tokens_match(req.token, portal.token()) {
         return Res::error(401, "missing or invalid token");
     }
     // Bound once here and worked from as an `Arc`, together with the generation it was
@@ -180,9 +205,11 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             // `/api/launch` and `/api/messages` stopped trusting positions from. A result
             // rendered from a stale position could name a different session by the time a click
             // on it reaches those endpoints.
-            let matches: Vec<&str> = crate::search::fuzzy(&catalog, &all, &query)
-                .into_iter()
-                .map(|idx| catalog.sessions[idx].meta.id.as_str())
+            let fuzzy = crate::search::fuzzy(&catalog, &all, &query);
+            let in_fuzzy: HashSet<usize> = fuzzy.iter().copied().collect();
+            let matches: Vec<&str> = fuzzy
+                .iter()
+                .map(|&idx| catalog.sessions[idx].meta.id.as_str())
                 .collect();
             // A newer search supersedes an older one still scanning: full_text checks this
             // ticket against the shared counter as it goes, so a search box wired per keystroke
@@ -196,13 +223,18 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             )
             .unwrap_or_default()
             .into_iter()
+            // A session already present in `matches` must not also appear in `hits`: the page
+            // renders both lists as rows keyed by id, so a session matching both ways would
+            // otherwise render twice. Mirrors `ui/app.rs`'s `recompute_rows`, which applies the
+            // identical rule for the TUI's own two-tier row list — one rule for both front ends.
+            .filter(|hit| !in_fuzzy.contains(&hit.session))
             .map(|hit| json!({ "id": catalog.sessions[hit.session].meta.id, "snippet": hit.snippet }))
             .collect();
             Res::json(200, json!({ "matches": matches, "hits": hits }))
         }
         ("GET", "/api/messages") => match query_param(req.query, "id") {
             None => Res::error(400, "id is required"),
-            Some(id) => match catalog.sessions.iter().position(|s| s.meta.id == id) {
+            Some(id) => match catalog.find_by_id(&id) {
                 Some(idx) => Res::json(200, messages_payload(&catalog, idx)),
                 None => Res::error(404, "no such session"),
             },
@@ -211,9 +243,10 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             let Some(id) = body_session_id(req.body) else {
                 return Res::error(400, "id is required");
             };
-            let Some(session) = catalog.sessions.iter().find(|s| s.meta.id == id) else {
+            let Some(idx) = catalog.find_by_id(&id) else {
                 return Res::error(404, "no such session");
             };
+            let session = &catalog.sessions[idx];
             let Some((pid, source_idx)) = session.live else {
                 return Res::error(409, "that session isn't running");
             };
@@ -241,7 +274,7 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             // position a page rendered a moment ago can already name a different session by the
             // time a click arrives here — exactly when a live session producing output would
             // reorder the list. The id is stable across that reorder.
-            let Some(idx) = catalog.sessions.iter().position(|s| s.meta.id == id) else {
+            let Some(idx) = catalog.find_by_id(&id) else {
                 return Res::error(404, "no such session");
             };
             let session = &catalog.sessions[idx];
@@ -405,6 +438,21 @@ mod tests {
 
         req.token = Some("wrong");
         assert_eq!(route(&req, &portal()).status, 401);
+    }
+
+    #[test]
+    fn token_matching_is_correct_for_equal_unequal_and_different_length_tokens() {
+        // Not a proof of constant time (that needs a timing measurement, out of scope for a unit
+        // test), but it does pin the one thing a naive "compare lengths first, bail out early"
+        // rewrite could get wrong: different-length tokens must still compare false, not panic
+        // on an out-of-bounds index.
+        assert!(tokens_match(Some("secret"), "secret"));
+        assert!(!tokens_match(Some("wrong"), "secret"));
+        assert!(!tokens_match(Some("secretlonger"), "secret"));
+        assert!(!tokens_match(Some("sec"), "secret"));
+        assert!(!tokens_match(None, "secret"));
+        assert!(!tokens_match(Some(""), "secret"));
+        assert!(tokens_match(Some(""), ""));
     }
 
     #[test]
@@ -597,6 +645,25 @@ mod tests {
         let id = hits[0]["id"].as_str().unwrap();
         let session = catalog.sessions.iter().find(|s| s.meta.id == id).unwrap();
         assert_eq!(session.meta.title, "Kubernetes ingress");
+    }
+
+    #[test]
+    fn a_session_matching_both_ways_appears_once_in_matches_and_not_in_hits() {
+        // "a" ("Docker build cache", fixture in `catalog::fake_catalog`) matches "docker" by
+        // title (a fuzzy match) *and* by transcript text ("fix docker") -- exactly the case that
+        // must produce one row, not two, or the page renders a duplicate `data-id`.
+        let res = route(&get("/api/search", "q=docker"), &portal());
+        let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+        let matches = value["matches"].as_array().unwrap();
+        assert!(
+            matches.iter().any(|m| m == "a"),
+            "expected \"a\" in matches"
+        );
+        let hits = value["hits"].as_array().unwrap();
+        assert!(
+            !hits.iter().any(|h| h["id"] == "a"),
+            "\"a\" must not also appear in hits: {hits:?}"
+        );
     }
 
     #[test]

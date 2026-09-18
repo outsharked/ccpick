@@ -50,7 +50,9 @@ pub fn run(settings: Settings, mut cache: Cache, options: WebOptions) -> anyhow:
         },
         stop,
     );
-    let _ = cache.lock().unwrap().save();
+    // `refresh_loop` only returns once `stop` is set, and nothing above ever does that (see this
+    // function's own doc comment), so this line never runs in practice: the portal keeps its
+    // cache in memory for the life of the run rather than persisting it to disk on exit.
     Ok(())
 }
 

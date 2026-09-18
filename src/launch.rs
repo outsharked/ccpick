@@ -122,42 +122,6 @@ pub fn terminal_command(
             argv.extend(plan.argv.iter().cloned());
             Some(argv)
         }
-        (Env::Windows, Env::Wsl { distro }) => {
-            let mut argv = windows_terminal_prefix(on_path);
-            argv.push("wsl.exe".to_string());
-            argv.push("-d".to_string());
-            argv.push(distro.clone());
-            // wsl.exe defaults to the distro's home directory, not our cwd, unless told
-            // otherwise; --cd takes a Linux path directly, which is what `plan.cwd` already is
-            // for a WSL target.
-            if !plan.cwd.as_os_str().is_empty() {
-                argv.push("--cd".to_string());
-                argv.push(plan.cwd.display().to_string());
-            }
-            // `--exec` execve's the command directly with no shell in between. A bare `--`
-            // instead would hand the rest of the line to the distro's default shell, which
-            // expands `$(...)`/backticks/`$VAR` in every word — including argv elements built
-            // from user-chosen free text (e.g. a ccs account name) — so it's not an option here.
-            argv.push("--exec".to_string());
-            // Because `--exec` skips the shell, `plan.env_set`'s shell-style `VAR=value` prefix
-            // and `plan.env_remove`'s `unset` have nothing to interpret them; `env` is a real
-            // program the distro resolves on its own PATH, so exec'ing it applies the same
-            // adjustments the native launch path gets from `Command::env`/`env_remove`. The
-            // trailing `--` stops `env` from parsing `plan.argv`'s own words as its options.
-            if !plan.env_set.is_empty() || !plan.env_remove.is_empty() {
-                argv.push("env".to_string());
-                for key in &plan.env_remove {
-                    argv.push("-u".to_string());
-                    argv.push(key.clone());
-                }
-                for (key, value) in &plan.env_set {
-                    argv.push(format!("{key}={value}"));
-                }
-                argv.push("--".to_string());
-            }
-            argv.extend(plan.argv.iter().cloned());
-            Some(argv)
-        }
         (Env::MacOs, Env::MacOs) => Some(vec![
             "osascript".to_string(),
             "-e".to_string(),
@@ -186,13 +150,26 @@ pub fn terminal_command(
                     .find(|name| on_path(name))
                     .map(str::to_string)
                 })?;
-            let mut argv = vec![chosen, "-e".to_string()];
+            // gnome-terminal is GOption-parsed, not the xterm `-e <argv...>` convention every
+            // other terminal here follows: its `-e` takes a single string, so the rest of argv
+            // would be read as gnome-terminal's own options and it exits with an "unknown
+            // option" error instead of opening a window. `--` stops its own option parsing and
+            // hands everything after it straight to the program to run. Matched by file name so
+            // a `$TERMINAL` of `/usr/bin/gnome-terminal` is caught too, not just a bare name.
+            let is_gnome_terminal = Path::new(&chosen)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f == "gnome-terminal");
+            let sep = if is_gnome_terminal { "--" } else { "-e" };
+            let mut argv = vec![chosen, sep.to_string()];
             argv.extend(plan.argv.iter().cloned());
             Some(argv)
         }
-        // Every other combination (a WSL host reaching Windows/macOS, a Linux host reaching
-        // WSL, a macOS host reaching anything else, ...) has no terminal ccpick can open
-        // reliably; the caller falls back to the paste command.
+        // Every cross-environment target (Windows -> WSL, a WSL host reaching Windows/macOS, a
+        // Linux host reaching WSL, a macOS host reaching anything else, ...) deliberately
+        // returns `None` here: launching across environments is out of scope for this project,
+        // so the caller always falls back to offering the command to paste, exactly as the TUI
+        // already does.
         _ => None,
     }
 }
@@ -222,6 +199,16 @@ pub fn spawn_in_new_terminal(
     target: &Env,
     host: &HostContext,
 ) -> Result<(), String> {
+    // `terminal_command` only ever returns `Some` when `target == host.env` (every
+    // cross-environment combination falls through to its `None` arm), so this function has no
+    // business being called otherwise. Asserted here rather than left implicit, so a caller that
+    // loosens the `is_launchable` gate upstream trips this in tests instead of only failing
+    // quietly with "no terminal to open" -- or, if that gate is loosened *and* a new same-looking
+    // arm is added later, silently applying one environment's cwd to another's process.
+    debug_assert_eq!(
+        target, &host.env,
+        "spawn_in_new_terminal must only be called with a target matching the host"
+    );
     let terminal_env = std::env::var("TERMINAL").ok();
     let argv = terminal_command(plan, target, host, terminal_env.as_deref(), &|name| {
         find_in_path(name).is_some()
@@ -398,49 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn a_wsl_session_from_windows_goes_through_wsl_exe() {
-        let host = HostContext {
-            env: Env::Windows,
-            ..Default::default()
-        };
-        let target = Env::Wsl {
-            distro: "Ubuntu".into(),
-        };
-        let argv =
-            terminal_command(&plan(), &target, &host, None, &|name| name == "wt.exe").unwrap();
-        assert_eq!(argv[0], "wt.exe");
-        assert!(argv.windows(3).any(|w| w == ["wsl.exe", "-d", "Ubuntu"]));
-    }
-
-    #[test]
-    fn wsl_target_sets_cwd_and_env_via_wsl_exe_flags() {
-        let host = HostContext {
-            env: Env::Windows,
-            ..Default::default()
-        };
-        let target = Env::Wsl {
-            distro: "Ubuntu".into(),
-        };
-        let mut plan = plan();
-        plan.env_set
-            .push(("CLAUDE_CONFIG_DIR".into(), "/alt".into()));
-        plan.env_remove.push("OTHER".into());
-        let argv = terminal_command(&plan, &target, &host, None, &|name| name == "wt.exe").unwrap();
-        assert!(argv.windows(2).any(|w| w == ["--cd", "/home/me/proj"]));
-        // `--exec` (not a bare `--`) is what makes this safe: exec, no shell, no `$(...)`
-        // expansion of anything in `plan.argv`. `env` then applies the adjustments, and its own
-        // `-u NAME`/`NAME=VALUE` args must sit adjacent in this exact shape, not just present
-        // anywhere in the line.
-        assert!(
-            argv.windows(5)
-                .any(|w| w == ["env", "-u", "OTHER", "CLAUDE_CONFIG_DIR=/alt", "--"])
-        );
-        let exec_pos = argv.iter().position(|a| a == "--exec").unwrap();
-        let env_pos = argv.iter().position(|a| a == "env").unwrap();
-        assert!(exec_pos < env_pos);
-    }
-
-    #[test]
     fn the_terminal_env_var_wins_on_linux() {
         let host = HostContext::default();
         let argv =
@@ -461,6 +405,60 @@ mod tests {
             terminal_command(&plan(), &Env::Linux, &host, None, &nothing_on_path),
             None
         );
+    }
+
+    #[test]
+    fn xterm_convention_terminals_use_dash_e() {
+        let host = HostContext::default();
+        for name in [
+            "x-terminal-emulator",
+            "konsole",
+            "alacritty",
+            "kitty",
+            "xterm",
+        ] {
+            let argv = terminal_command(&plan(), &Env::Linux, &host, Some(name), &nothing_on_path)
+                .unwrap();
+            assert_eq!(argv[0], name);
+            assert_eq!(argv[1], "-e", "{name} should use -e");
+            assert!(argv.iter().any(|a| a == "--resume"));
+        }
+    }
+
+    #[test]
+    fn gnome_terminal_uses_double_dash_not_dash_e() {
+        // gnome-terminal is GOption-parsed: a bare `-e --resume abc` reads `--resume` and `abc`
+        // as its own options rather than the program to run, and it exits with an "unknown
+        // option" error instead of opening a window.
+        let host = HostContext::default();
+        let argv = terminal_command(
+            &plan(),
+            &Env::Linux,
+            &host,
+            Some("gnome-terminal"),
+            &nothing_on_path,
+        )
+        .unwrap();
+        assert_eq!(argv[0], "gnome-terminal");
+        assert_eq!(argv[1], "--");
+        assert!(argv.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn a_terminal_env_naming_a_full_path_to_gnome_terminal_still_gets_double_dash() {
+        // `$TERMINAL` can be a full path rather than a bare name; the convention is chosen by
+        // file name, not by the exact string on `PATH`.
+        let host = HostContext::default();
+        let argv = terminal_command(
+            &plan(),
+            &Env::Linux,
+            &host,
+            Some("/usr/bin/gnome-terminal"),
+            &nothing_on_path,
+        )
+        .unwrap();
+        assert_eq!(argv[0], "/usr/bin/gnome-terminal");
+        assert_eq!(argv[1], "--");
     }
 
     #[test]

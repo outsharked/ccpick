@@ -181,6 +181,16 @@ impl Catalog {
         self.sources[source].env == self.host.env
     }
 
+    /// A session's index by its bare id. Correct only because ccpick currently registers a
+    /// single provider: the scan-time maps in `Catalog::build` (`launches`, `live`) key on
+    /// `(provider, id)` since two providers could otherwise mint the same id, but nothing
+    /// downstream of this lookup carries a provider alongside the id yet. Centralizing it here
+    /// means a second provider only has to fix one place, not every call site that currently
+    /// assumes ids are globally unique.
+    pub fn find_by_id(&self, id: &str) -> Option<usize> {
+        self.sessions.iter().position(|s| s.meta.id == id)
+    }
+
     /// The session's project dir as a path ccpick can check on disk.
     pub fn host_cwd(&self, idx: usize, source: usize) -> Option<PathBuf> {
         let cwd = self.sessions[idx].meta.cwd.as_ref()?;

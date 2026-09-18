@@ -1,5 +1,7 @@
 //! The only module that knows about the HTTP crate. Everything else works through `route()`.
-use crate::web::route::{Req, Res, host_is_allowed, query_param, route};
+use crate::web::route::{
+    Req, Res, host_is_allowed, origin_matches, query_param, route, tokens_match,
+};
 use crate::web::state::Portal;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -76,16 +78,28 @@ fn handle(mut request: tiny_http::Request, portal: &Portal) {
     let origin = header(&request, "Origin").map(str::to_string);
 
     // SSE never completes, so it can't be served through `route()`'s request/response model: it
-    // is handled here, before `route`, with its own Host and token checks — the same Host
-    // allowlist `route()` applies to everything else, via the shared `host_is_allowed`, so there
-    // is one rule rather than two.
+    // is handled here, before `route`, with its own Host, Origin and token checks — the same
+    // checks `route()` applies to everything else, via the shared `host_is_allowed`,
+    // `origin_matches` and `tokens_match`, so there is one rule rather than two (or three).
     if path == "/api/events" {
         if !host_is_allowed(host.as_deref()) {
             write_response(request, Res::error(403, "unrecognized Host header"));
             return;
         }
+        if let Some(o) = origin.as_deref()
+            && !o.is_empty()
+            && !portal
+                .origin()
+                .is_some_and(|expected| origin_matches(expected, o))
+        {
+            write_response(
+                request,
+                Res::error(403, "cross-origin requests are refused"),
+            );
+            return;
+        }
         let event_token = header_token.clone().or_else(|| query_param(query, "t"));
-        if event_token.as_deref() != Some(portal.token()) {
+        if !tokens_match(event_token.as_deref(), portal.token()) {
             write_response(request, Res::error(401, "missing or invalid token"));
             return;
         }
@@ -324,6 +338,25 @@ mod tests {
         reader.read_line(&mut status).unwrap();
         assert!(status.contains("200"));
         drop(reader);
+
+        stop();
+        assert_port_closed(port);
+    }
+
+    #[test]
+    fn the_events_endpoint_rejects_a_foreign_origin_even_with_the_token() {
+        // Before this fix, `/api/events` checked Host and the token but not Origin -- the one
+        // check `route()` applies to every other endpoint. `bind()` records the page's own
+        // origin as soon as it binds, so a request claiming a different one must still be
+        // refused here.
+        let portal = Arc::new(Portal::new(fake_catalog(), "secret".into()));
+        let (port, stop) = serve_for_test(portal).unwrap();
+
+        let (code, _) = request(
+            port,
+            "GET /api/events?t=secret HTTP/1.1\r\nHost: localhost\r\nOrigin: https://evil.example\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(code, 403);
 
         stop();
         assert_port_closed(port);

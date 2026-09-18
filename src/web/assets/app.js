@@ -146,13 +146,25 @@
       detail.innerHTML = highlightHtml(snippet, query);
       return detail;
     }
-    detail.textContent = [session.cwd || "?", session.source, session.when]
-      .filter(Boolean)
-      .join(" · ");
+    const parts = [session.cwd || "?", session.source, session.when].filter(Boolean);
+    // A session running under a non-default account (e.g. a different ccs profile) stays
+    // visible under its usual row, but the account actually running it must not be lost.
+    if (session.running_source && session.running_source !== session.source) {
+      parts.push(`running in ${session.running_source}`);
+    }
+    detail.textContent = parts.join(" · ");
     if (session.running) {
       const tag = document.createElement("span");
       tag.className = "running-tag";
       tag.textContent = " [running]";
+      detail.appendChild(tag);
+    } else if (!session.launchable) {
+      // ccpick can't spawn this session's terminal itself (e.g. a session on the other side of
+      // the Windows/WSL boundary); Enter/click still works, but opens the paste dialog instead
+      // of a new window, so say so up front rather than only after a click.
+      const tag = document.createElement("span");
+      tag.className = "paste-tag";
+      tag.textContent = " [paste to run]";
       detail.appendChild(tag);
     }
     return detail;
@@ -214,6 +226,7 @@
     for (const li of els.list.querySelectorAll(".row")) {
       const selected = li.dataset.id === state.selectedId;
       li.classList.toggle("selected", selected);
+      li.setAttribute("aria-selected", selected ? "true" : "false");
       if (selected) li.scrollIntoView({ block: "nearest" });
     }
   }

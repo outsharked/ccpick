@@ -132,21 +132,28 @@ The portal has an endpoint that spawns processes. It is treated accordingly.
 - **Any request carrying a foreign `Origin` is rejected**, and no CORS headers are
   ever sent.
 
-A token in a process argument or a URL is visible to other processes owned by the same
-user. That is the same trust boundary as the transcripts themselves, which that user
-can already read.
+The token reaches the browser as an element of the "open URL" process's argv (`xdg-open`,
+`open`, or `cmd.exe start`). On Linux, `/proc/<pid>/cmdline` is world-readable, so it is
+readable by *any* local user, not just other processes owned by the same account —
+wider than the transcripts themselves, which the filesystem restricts to the owning
+user. It is not the same trust boundary, and the token check compares byte-for-byte
+without short-circuiting so guessing it can't be sped up by timing a partial match
+either.
 
 ## Picking a session
 
 - **Running** → `focus::focus_session`, unchanged from the TUI.
 - **Stopped** → `spawn_in_new_terminal`, which resolves an argv per platform:
   - Windows: `wt.exe`, falling back to `cmd /c start`.
-  - Windows → WSL: `wt.exe wsl.exe -d <distro> -- <launcher>`.
   - macOS: `open -a Terminal` (iTerm when present).
   - Linux: `$TERMINAL`, then `x-terminal-emulator`, then a short list.
 - **Neither** → the response carries the ready-to-paste command and the page shows it
   with a copy button, the same fallback the TUI already offers for cross-environment
   sessions.
+
+A session in an environment other than the host's own (Windows ↔ WSL, or either of
+those reaching macOS) always falls back to the paste command: cross-environment
+launching is out of scope for this project, on the portal exactly as on the TUI.
 
 Linux desktops have no reliable answer here. When nothing matches, fall back to the
 paste command rather than guessing at a terminal that may not exist.

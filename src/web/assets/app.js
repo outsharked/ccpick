@@ -70,6 +70,7 @@
   let debounceHandle = null;
   let statusTimer = null;
   let dialogFocusId = null;
+  let dialogFocusAgent = null;
   let updatesPending = false;
 
   async function api(path, opts) {
@@ -393,7 +394,9 @@
       return;
     }
     try {
-      const data = await getJSON(`/api/messages?id=${encodeURIComponent(id)}`);
+      const data = await getJSON(
+        `/api/messages?id=${encodeURIComponent(id)}&agent=${encodeURIComponent(session.agent)}`,
+      );
       if (mine !== previewSeq) return;
       renderPreview(session, data.messages);
     } catch {
@@ -460,10 +463,12 @@
       els.dialogNote.textContent = `Still running as pid ${body.pid}.`;
       els.dialogFocus.hidden = false;
       dialogFocusId = session.id;
+      dialogFocusAgent = session.agent;
     } else {
       els.dialogNote.hidden = true;
       els.dialogFocus.hidden = true;
       dialogFocusId = null;
+      dialogFocusAgent = null;
     }
     els.dialogCopy.textContent = "Copy command";
     els.dialog.showModal();
@@ -473,7 +478,7 @@
     const session = state.byId.get(id);
     if (!session) return;
     const endpoint = session.running ? "/api/focus" : "/api/launch";
-    const { status, body } = await postJSON(endpoint, { id });
+    const { status, body } = await postJSON(endpoint, { id, agent: session.agent });
     if (status === 200) {
       setStatus(session.running ? `focused ${session.title}` : `launching ${session.title}`);
     } else if (status === 409 && body && body.command) {
@@ -505,9 +510,10 @@
 
   els.dialogFocus.addEventListener("click", async () => {
     const id = dialogFocusId;
+    const agent = dialogFocusAgent;
     els.dialog.close();
     if (!id) return;
-    const { status, body } = await postJSON("/api/focus", { id });
+    const { status, body } = await postJSON("/api/focus", { id, agent });
     setStatus(status === 200 ? "focused" : (body && body.error) || "could not focus that session");
   });
 

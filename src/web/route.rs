@@ -232,18 +232,18 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             .collect();
             Res::json(200, json!({ "matches": matches, "hits": hits }))
         }
-        ("GET", "/api/messages") => match query_param(req.query, "id") {
+        ("GET", "/api/messages") => match query_session_ref(req.query) {
             None => Res::error(400, "id is required"),
-            Some(id) => match catalog.find_by_id(&id) {
+            Some((agent, id)) => match catalog.find_by_id(&agent, &id) {
                 Some(idx) => Res::json(200, messages_payload(&catalog, idx)),
                 None => Res::error(404, "no such session"),
             },
         },
         ("POST", "/api/focus") => {
-            let Some(id) = body_session_id(req.body) else {
+            let Some((agent, id)) = body_session_ref(req.body) else {
                 return Res::error(400, "id is required");
             };
-            let Some(idx) = catalog.find_by_id(&id) else {
+            let Some(idx) = catalog.find_by_id(&agent, &id) else {
                 return Res::error(404, "no such session");
             };
             let session = &catalog.sessions[idx];
@@ -266,15 +266,17 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             }
         }
         ("POST", "/api/launch") => {
-            let Some(id) = body_session_id(req.body) else {
+            let Some((agent, id)) = body_session_ref(req.body) else {
                 return Res::error(400, "id is required");
             };
-            // Addressed by id, not by list position: `catalog.sessions` is sorted by
+            // Addressed by (agent, id), not by list position: `catalog.sessions` is sorted by
             // `Reverse(last_ts)` and the refresh loop republishes every few seconds, so a
             // position a page rendered a moment ago can already name a different session by the
             // time a click arrives here — exactly when a live session producing output would
-            // reorder the list. The id is stable across that reorder.
-            let Some(idx) = catalog.find_by_id(&id) else {
+            // reorder the list. The (agent, id) pair is stable across that reorder, and
+            // disambiguates two providers that mint the same bare id (see
+            // `Catalog::find_by_id`).
+            let Some(idx) = catalog.find_by_id(&agent, &id) else {
                 return Res::error(404, "no such session");
             };
             let session = &catalog.sessions[idx];
@@ -323,12 +325,22 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
     }
 }
 
-pub fn body_session_id(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()?
-        .get("id")?
-        .as_str()
-        .map(str::to_string)
+/// The `(agent, id)` pair identifying a session, out of a POST body. Both fields are required:
+/// `Catalog::find_by_id` needs the provider id alongside the bare session id now that a second
+/// provider is registered (see its doc comment).
+pub fn body_session_ref(body: &[u8]) -> Option<(String, String)> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let id = value.get("id")?.as_str()?.to_string();
+    let agent = value.get("agent")?.as_str()?.to_string();
+    Some((agent, id))
+}
+
+/// The `(agent, id)` pair out of a GET query string, mirroring `body_session_ref` for
+/// `/api/messages`.
+fn query_session_ref(query: &str) -> Option<(String, String)> {
+    let id = query_param(query, "id")?;
+    let agent = query_param(query, "agent")?;
+    Some((agent, id))
 }
 
 #[cfg(test)]
@@ -366,14 +378,17 @@ mod tests {
 
     #[test]
     fn focusing_a_session_that_is_not_running_is_a_conflict_not_an_action() {
-        let res = route(&post("/api/focus", br#"{"id":"a"}"#), &portal());
+        let res = route(
+            &post("/api/focus", br#"{"id":"a","agent":"fake"}"#),
+            &portal(),
+        );
         assert_eq!(res.status, 409);
     }
 
     #[test]
     fn focusing_an_unknown_id_is_a_404() {
         let res = route(
-            &post("/api/focus", br#"{"id":"does-not-exist"}"#),
+            &post("/api/focus", br#"{"id":"does-not-exist","agent":"fake"}"#),
             &portal(),
         );
         assert_eq!(res.status, 404);
@@ -382,7 +397,10 @@ mod tests {
     #[test]
     fn launching_a_session_ccpick_cannot_reach_returns_the_command_to_paste() {
         let portal = Portal::new(crate::catalog::fake_catalog_with_foreign(), "secret".into());
-        let res = route(&post("/api/launch", br#"{"id":"w"}"#), &portal);
+        let res = route(
+            &post("/api/launch", br#"{"id":"w","agent":"fake"}"#),
+            &portal,
+        );
         assert_eq!(res.status, 409);
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
         assert!(value["command"].as_str().unwrap().contains("--resume"));
@@ -393,7 +411,10 @@ mod tests {
         // "c" ("Running thing") is live under source "two", pid 4242 -- see
         // `catalog::fake_catalog`. This guard must fire before the launch would otherwise
         // proceed, and must never reach `spawn_in_new_terminal`.
-        let res = route(&post("/api/launch", br#"{"id":"c"}"#), &portal());
+        let res = route(
+            &post("/api/launch", br#"{"id":"c","agent":"fake"}"#),
+            &portal(),
+        );
         assert_eq!(res.status, 409);
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
         assert_eq!(value["pid"], 4242);
@@ -407,9 +428,19 @@ mod tests {
             route(&post("/api/launch", b"not json"), &portal()).status,
             400
         );
+        // Valid JSON but missing the "agent" field required alongside "id" is also a 400, not a
+        // 404 -- there's no provider to disambiguate against.
         assert_eq!(
             route(
                 &post("/api/launch", br#"{"id":"does-not-exist"}"#),
+                &portal()
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            route(
+                &post("/api/launch", br#"{"id":"does-not-exist","agent":"fake"}"#),
                 &portal()
             )
             .status,
@@ -418,10 +449,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_session_id_out_of_a_body() {
-        assert_eq!(body_session_id(br#"{"id":"abc"}"#), Some("abc".to_string()));
-        assert_eq!(body_session_id(br#"{"other":1}"#), None);
-        assert_eq!(body_session_id(b""), None);
+    fn parses_the_session_ref_out_of_a_body() {
+        assert_eq!(
+            body_session_ref(br#"{"id":"abc","agent":"fake"}"#),
+            Some(("fake".to_string(), "abc".to_string()))
+        );
+        // Missing either half of the pair is not enough to identify a session.
+        assert_eq!(body_session_ref(br#"{"id":"abc"}"#), None);
+        assert_eq!(body_session_ref(br#"{"agent":"fake"}"#), None);
+        assert_eq!(body_session_ref(br#"{"other":1}"#), None);
+        assert_eq!(body_session_ref(b""), None);
     }
 
     #[test]
@@ -754,7 +791,7 @@ mod tests {
         // "a" is "Docker build cache", whose fixture messages are a known user/assistant pair —
         // pin their content, not just that `messages` happens to be an array, which
         // `{"messages":[]}` would also satisfy.
-        let res = route(&get("/api/messages", "id=a"), &portal());
+        let res = route(&get("/api/messages", "id=a&agent=fake"), &portal());
         assert_eq!(res.status, 200);
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
         let messages = value["messages"].as_array().unwrap();
@@ -768,10 +805,16 @@ mod tests {
     #[test]
     fn an_unknown_id_is_a_404_not_a_panic() {
         assert_eq!(
-            route(&get("/api/messages", "id=does-not-exist"), &portal()).status,
+            route(
+                &get("/api/messages", "id=does-not-exist&agent=fake"),
+                &portal()
+            )
+            .status,
             404
         );
         assert_eq!(route(&get("/api/messages", ""), &portal()).status, 400);
+        // "id" alone is not enough to identify a session once more than one provider exists.
+        assert_eq!(route(&get("/api/messages", "id=a"), &portal()).status, 400);
     }
 
     #[test]

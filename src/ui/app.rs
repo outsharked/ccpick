@@ -693,6 +693,49 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_running_session_focuses_using_that_providers_own_title() {
+        // Codex sets its terminal title from the thread's own `name` (see `title_for` in
+        // `providers/codex/mod.rs`), which lands in `SessionMeta::title` exactly like any other
+        // provider's title. `App::enter` must pass that title through unchanged -- never
+        // something Claude-shaped, like a title derived from the first prompt -- since it
+        // becomes the tab title `focus_session` (src/focus.rs) hands to the terminal the
+        // developer is about to switch to.
+        use crate::model::LaunchRecord;
+        use crate::providers::fake::FakeProvider;
+
+        let mut p = FakeProvider::with_id("codex-like");
+        p.add_source("term", "/s");
+        p.add_session(
+            "/s",
+            "thread-abc123",
+            "Investigate the flaky retry test",
+            1000,
+            1000,
+            &[],
+        );
+        p.records.insert(
+            "term".into(),
+            vec![LaunchRecord {
+                pid: 777,
+                session_id: "thread-abc123".into(),
+                started_at_ms: 1,
+                alive: true,
+            }],
+        );
+        let catalog = crate::catalog::build_fake(p);
+        let mut a = App::new(Arc::new(catalog), "");
+        a.selected = 0;
+        assert_eq!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Focus {
+                pid: 777,
+                source: 0,
+                title: "Investigate the flaky retry test".into(),
+            }
+        );
+    }
+
+    #[test]
     fn missing_cwd_is_blocked() {
         let mut a = app("");
         a.selected = 3;

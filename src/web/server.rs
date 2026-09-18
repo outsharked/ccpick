@@ -385,7 +385,7 @@ mod tests {
         let portal = Arc::new(Portal::new(fake_catalog(), "secret".into()));
         let (port, stop) = serve_for_test(portal).unwrap();
 
-        let body = r#"{"id":"does-not-exist"}"#;
+        let body = r#"{"id":"does-not-exist","agent":"fake"}"#;
         let request_line = format!(
             "POST /api/launch HTTP/1.1\r\nHost: localhost\r\nX-CCPick-Token: secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),

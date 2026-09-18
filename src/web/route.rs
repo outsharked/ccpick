@@ -570,6 +570,41 @@ mod tests {
         let body = String::from_utf8(route(&req, &portal()).body).unwrap();
         assert!(body.contains("replaceState"));
         assert!(body.contains("X-CCPick-Token"));
+        // The token is also kept per-tab, or reloading the page would leave it with none and
+        // every request would 401.
+        assert!(body.contains("sessionStorage"));
+    }
+
+    #[test]
+    fn the_page_refreshes_only_when_asked_to() {
+        let req = Req {
+            method: "GET",
+            path: "/app.js",
+            query: "",
+            token: None,
+            origin: None,
+            host: None,
+            body: b"",
+        };
+        let script = String::from_utf8(route(&req, &portal()).body).unwrap();
+        // An SSE event marks the refresh control; it must not refetch the list, which would
+        // reorder rows under whoever is reading them.
+        assert!(script.contains("setUpdatesPending(true)"));
+        assert!(!script.contains("addEventListener(\"generation\", loadSessions)"));
+        // F5 and Ctrl-R refresh the data rather than reloading the page.
+        assert!(script.contains("\"F5\""));
+
+        let req = Req {
+            method: "GET",
+            path: "/",
+            query: "",
+            token: None,
+            origin: None,
+            host: None,
+            body: b"",
+        };
+        let page = String::from_utf8(route(&req, &portal()).body).unwrap();
+        assert!(page.contains("id=\"refresh\""));
     }
 
     #[test]

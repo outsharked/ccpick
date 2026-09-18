@@ -8,15 +8,34 @@
   const DEBOUNCE_MS = 150;
   const TOKEN_HEADER = "X-CCPick-Token";
 
-  // The token arrives once, in the URL the server printed. It never has anywhere else to live
-  // (there is no login), so it's kept in memory and sent on every request from here on, and the
-  // URL is scrubbed immediately so it doesn't linger in history or get shared by accident.
-  const TOKEN = new URLSearchParams(location.search).get("t") || "";
-  history.replaceState({}, "", "/");
+  // The token arrives once, in the URL the server printed, and is scrubbed from the address bar
+  // immediately so it doesn't linger in history or get shared by accident. It is also stashed in
+  // sessionStorage, because otherwise reloading the page (F5, the toolbar button, restoring the
+  // tab) would leave it with no token at all and every request would 401. sessionStorage is
+  // per-tab, survives a reload, and is discarded when the tab closes.
+  const TOKEN_KEY = "ccpick-token";
+  const TOKEN = (() => {
+    const fromUrl = new URLSearchParams(location.search).get("t");
+    if (fromUrl) {
+      try {
+        sessionStorage.setItem(TOKEN_KEY, fromUrl);
+      } catch {
+        // Private windows and blocked site data: the token still works for this page load.
+      }
+      history.replaceState({}, "", "/");
+      return fromUrl;
+    }
+    try {
+      return sessionStorage.getItem(TOKEN_KEY) || "";
+    } catch {
+      return "";
+    }
+  })();
 
   const els = {
     search: document.getElementById("search"),
     counts: document.getElementById("counts"),
+    refresh: document.getElementById("refresh"),
     list: document.getElementById("session-list"),
     preview: document.getElementById("preview"),
     status: document.getElementById("statusline"),
@@ -46,6 +65,7 @@
   let debounceHandle = null;
   let statusTimer = null;
   let dialogFocusId = null;
+  let updatesPending = false;
 
   async function api(path, opts) {
     const headers = Object.assign({}, (opts && opts.headers) || {});
@@ -339,9 +359,25 @@
     }
   }
 
+  // Sessions change while you are reading the list — one gains a message and sorts to the top,
+  // taking the row you were about to click with it. So an event never refetches; it only marks
+  // the refresh control, and the list moves when the user asks it to.
+  function setUpdatesPending(pending) {
+    updatesPending = pending;
+    els.refresh.classList.toggle("pending", pending);
+    els.refresh.title = pending
+      ? "Sessions have changed — refresh (F5)"
+      : "Refresh sessions (F5)";
+  }
+
+  async function refresh() {
+    setUpdatesPending(false);
+    await loadSessions();
+  }
+
   function subscribeEvents() {
     const source = new EventSource(`/api/events?t=${encodeURIComponent(TOKEN)}`);
-    source.addEventListener("generation", loadSessions);
+    source.addEventListener("generation", () => setUpdatesPending(true));
   }
 
   function openDialog(session, body) {
@@ -417,6 +453,13 @@
       if (event.key === "Escape") els.dialog.close();
       return;
     }
+    // F5 and Ctrl-R refresh the sessions rather than reloading the page: this is an app, and a
+    // reload would throw away the preview and the query to fetch the same three files again.
+    if (event.key === "F5" || ((event.ctrlKey || event.metaKey) && event.key === "r")) {
+      event.preventDefault();
+      refresh();
+      return;
+    }
     if (event.key === "/" && document.activeElement !== els.search) {
       event.preventDefault();
       els.search.focus();
@@ -439,7 +482,10 @@
     }
   });
 
+  els.refresh.addEventListener("click", refresh);
+
   showEmptyPreview();
+  setUpdatesPending(false);
   loadSessions();
   subscribeEvents();
 })();

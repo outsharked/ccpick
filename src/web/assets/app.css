@@ -118,6 +118,55 @@ body {
   font-size: 12px;
 }
 
+/* The refresh control doubles as the "something changed" indicator: an SSE event marks it
+   rather than reordering the list under the reader. */
+#refresh {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0.25rem 0.45rem;
+  cursor: pointer;
+  position: relative;
+}
+
+#refresh:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+
+#refresh.pending {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+/* A dot in the corner, so "there are updates" reads at a glance without moving anything. */
+#refresh.pending::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* --- Two panes, like the TUI's list/preview split --- */
 
 #body {

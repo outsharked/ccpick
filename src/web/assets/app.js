@@ -313,6 +313,9 @@
       div.append(role, document.createTextNode(m.text));
       els.preview.appendChild(div);
     }
+    // Open at the end of the conversation, as the TUI does: the last thing said is almost always
+    // what you came to read.
+    els.preview.scrollTop = els.preview.scrollHeight;
   }
 
   async function loadPreview(id) {

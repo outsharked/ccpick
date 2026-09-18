@@ -605,6 +605,8 @@ mod tests {
         };
         let page = String::from_utf8(route(&req, &portal()).body).unwrap();
         assert!(page.contains("id=\"refresh\""));
+        // The preview opens at the end of the conversation, as the TUI does.
+        assert!(script.contains("els.preview.scrollTop = els.preview.scrollHeight"));
     }
 
     #[test]

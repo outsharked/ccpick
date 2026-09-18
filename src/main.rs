@@ -25,6 +25,26 @@ struct Cli {
     /// Don't read or write the metadata cache
     #[arg(long)]
     no_cache: bool,
+    #[cfg(feature = "web")]
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[cfg(feature = "web")]
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Serve the session list as a local web page
+    Web {
+        /// Port to listen on (default: chosen by the OS)
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Seconds between refreshes
+        #[arg(long, default_value_t = 10)]
+        refresh: u64,
+        /// Print the URL instead of opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 fn main() {
@@ -45,6 +65,26 @@ fn run() -> Result<i32> {
         (false, Some(path)) => Cache::load(path),
         _ => Cache::in_memory(),
     };
+
+    #[cfg(feature = "web")]
+    if let Some(Command::Web {
+        port,
+        refresh,
+        no_open,
+    }) = cli.command
+    {
+        ccpick::web::run(
+            settings,
+            cache,
+            ccpick::web::WebOptions {
+                port,
+                refresh,
+                open: !no_open,
+            },
+        )?;
+        return Ok(0);
+    }
+
     let catalog = catalog::build_from_settings(&settings, &mut cache)?;
     if let Err(err) = cache.save() {
         eprintln!("ccpick: warning: could not write cache: {err}");

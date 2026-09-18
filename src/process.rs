@@ -290,6 +290,23 @@ fn linux_cmdline_contains(pid: u32, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The basename of `argv[0]` from a `/proc/<pid>/cmdline`-shaped byte string (NUL-separated,
+/// conventionally NUL-terminated) — `None` for an empty `argv[0]` or one that isn't valid UTF-8.
+/// Pure and allocation-light on purpose: this is the part of `linux_argv0_basename_is` worth
+/// testing directly, over fabricated bytes, rather than by spawning a real process and reading
+/// the real `/proc`.
+#[cfg(target_os = "linux")]
+fn argv0_basename(cmdline: &[u8]) -> Option<&str> {
+    let argv0 = cmdline.split(|&b| b == 0).next()?;
+    if argv0.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(argv0)
+        .ok()
+        .and_then(|s| Path::new(s).file_name())
+        .and_then(|f| f.to_str())
+}
+
 /// True if `pid`'s `argv[0]` basename is exactly `name` — stricter than `linux_cmdline_contains`
 /// above (which stays a substring match for its own caller, `is_running`, unchanged). This one
 /// backs `open_files`, where a substring match is too loose: every rollout path contains
@@ -304,11 +321,7 @@ fn linux_argv0_basename_is(pid: u32, name: &str) -> bool {
     let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
         return false;
     };
-    let argv0 = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
-    let argv0 = String::from_utf8_lossy(argv0);
-    Path::new(argv0.as_ref())
-        .file_name()
-        .is_some_and(|f| f == name)
+    argv0_basename(&bytes) == Some(name)
 }
 
 /// This host's own `/proc`: every (pid, open file target) pair for a pid whose `argv[0]`
@@ -846,29 +859,37 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn argv0_basename_match_is_not_fooled_by_a_path_argument_that_merely_mentions_the_name() {
-        // A rollout path always contains ".codex", so a substring match on the whole command
-        // line would wrongly treat "look at this codex file" as "codex is running". Only an
-        // exact match on argv[0]'s basename should count.
-        // `sh -c '<script>' <extra args...>`: the script's own argv[0] is "sh"; the extra
-        // argument lands in the script's positional parameters, carrying the substring without
-        // touching argv[0].
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .arg("/home/me/.codex/sessions/2026/09/18/rollout-codex.jsonl")
-            .spawn()
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let pid = child.id();
-        assert!(
-            linux_cmdline_contains(pid, "codex"),
-            "sanity check: the substring is indeed present in the argument"
+    fn argv0_basename_matches_a_bare_name() {
+        assert_eq!(argv0_basename(b"codex\0"), Some("codex"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn argv0_basename_strips_a_full_path_down_to_the_basename() {
+        assert_eq!(
+            argv0_basename(b"/home/me/.local/bin/codex\0"),
+            Some("codex")
         );
-        assert!(!linux_argv0_basename_is(pid, "codex"));
-        assert!(linux_argv0_basename_is(pid, "sh"));
-        child.kill().unwrap();
-        child.wait().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn argv0_basename_ignores_a_later_argument_that_merely_mentions_the_name() {
+        // The exact case a plain substring scan (linux_cmdline_contains) gets wrong: every
+        // rollout path contains ".codex", so "codex" appearing only in argv[1] must not count.
+        let cmdline = b"/bin/sh\0-c\0sleep 30\0/home/me/.codex/sessions/rollout-x.jsonl\0";
+        assert_eq!(argv0_basename(cmdline), Some("sh"));
+        assert_ne!(argv0_basename(cmdline), Some("codex"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn empty_or_unterminated_cmdline_has_no_argv0_and_does_not_panic() {
+        assert_eq!(argv0_basename(b""), None);
+        // No NUL at all: not the shape a real /proc/<pid>/cmdline takes, but must not panic —
+        // and in particular must not be mistaken for a match on the whole line.
+        let no_nul = b"not-really-a-cmdline";
+        assert_ne!(argv0_basename(no_nul), Some("codex"));
     }
 
     #[test]

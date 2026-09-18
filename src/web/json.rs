@@ -29,7 +29,6 @@ pub fn sessions_payload(catalog: &Catalog, generation: u64, now_ms: i64) -> Valu
                 .live
                 .map(|(_, live_idx)| catalog.sources[live_idx].name.clone());
             json!({
-                "index": index,
                 "id": session.meta.id,
                 "title": session.meta.title,
                 "cwd": cwd,
@@ -97,7 +96,6 @@ mod tests {
         assert_eq!(running["pid"], 4242);
         assert_eq!(running["running"], true);
         assert_eq!(running["source"], "two");
-        assert!(running["index"].is_number());
         assert!(running["when"].is_string());
         assert!(running["exact"].is_string());
     }

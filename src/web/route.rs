@@ -170,20 +170,18 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             .collect();
             Res::json(200, json!({ "matches": matches, "hits": hits }))
         }
-        ("GET", "/api/messages") => match query_param(req.query, "index") {
-            None => Res::error(400, "index is required"),
-            Some(raw) => match raw.parse::<usize>() {
-                Ok(idx) if idx < catalog.sessions.len() => {
-                    Res::json(200, messages_payload(&catalog, idx))
-                }
-                _ => Res::error(404, "no such session"),
+        ("GET", "/api/messages") => match query_param(req.query, "id") {
+            None => Res::error(400, "id is required"),
+            Some(id) => match catalog.sessions.iter().position(|s| s.meta.id == id) {
+                Some(idx) => Res::json(200, messages_payload(&catalog, idx)),
+                None => Res::error(404, "no such session"),
             },
         },
         ("POST", "/api/focus") => {
-            let Some(idx) = body_index(req.body) else {
-                return Res::error(400, "index is required");
+            let Some(id) = body_session_id(req.body) else {
+                return Res::error(400, "id is required");
             };
-            let Some(session) = catalog.sessions.get(idx) else {
+            let Some(session) = catalog.sessions.iter().find(|s| s.meta.id == id) else {
                 return Res::error(404, "no such session");
             };
             let Some((pid, source_idx)) = session.live else {
@@ -205,15 +203,39 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
             }
         }
         ("POST", "/api/launch") => {
-            let Some(idx) = body_index(req.body) else {
-                return Res::error(400, "index is required");
+            let Some(id) = body_session_id(req.body) else {
+                return Res::error(400, "id is required");
             };
-            let Some(session) = catalog.sessions.get(idx) else {
+            // Addressed by id, not by list position: `catalog.sessions` is sorted by
+            // `Reverse(last_ts)` and the refresh loop republishes every few seconds, so a
+            // position a page rendered a moment ago can already name a different session by the
+            // time a click arrives here — exactly when a live session producing output would
+            // reorder the list. The id is stable across that reorder.
+            let Some(idx) = catalog.sessions.iter().position(|s| s.meta.id == id) else {
                 return Res::error(404, "no such session");
             };
+            let session = &catalog.sessions[idx];
             let source_idx = session.default_source;
             let plan = catalog.launch_plan(idx, source_idx);
             let env = catalog.sources[source_idx].env.clone();
+            // A stale tab's launch button can race a session that has since started running
+            // elsewhere; resuming it again would run a second agent against the same
+            // transcript. The TUI forbids this at the UI layer (`ui/app.rs` routes Enter to
+            // focus instead of launch for a running session), but the page can only know what
+            // it last fetched, while the server's own catalog is the fresher view — so this
+            // guard has to live here too, carrying the pid back so the page can offer focusing
+            // instead.
+            if let Some((pid, _)) = session.live {
+                return Res::json(
+                    409,
+                    json!({
+                        "error": "that session is already running",
+                        "pid": pid,
+                        "command": crate::shell::resume_command(&plan, &env),
+                        "shell": env.shell_name(),
+                    }),
+                );
+            }
             // Anything ccpick can't open itself comes back with the line to paste, so the page
             // always has something to offer.
             let fallback = |error: String| {
@@ -238,12 +260,12 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
     }
 }
 
-pub fn body_index(body: &[u8]) -> Option<usize> {
+pub fn body_session_id(body: &[u8]) -> Option<String> {
     serde_json::from_slice::<Value>(body)
         .ok()?
-        .get("index")?
-        .as_u64()
-        .map(|n| n as usize)
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -281,24 +303,39 @@ mod tests {
 
     #[test]
     fn focusing_a_session_that_is_not_running_is_a_conflict_not_an_action() {
-        let res = route(&post("/api/focus", br#"{"index":0}"#), &portal());
+        let res = route(&post("/api/focus", br#"{"id":"a"}"#), &portal());
         assert_eq!(res.status, 409);
+    }
+
+    #[test]
+    fn focusing_an_unknown_id_is_a_404() {
+        let res = route(
+            &post("/api/focus", br#"{"id":"does-not-exist"}"#),
+            &portal(),
+        );
+        assert_eq!(res.status, 404);
     }
 
     #[test]
     fn launching_a_session_ccpick_cannot_reach_returns_the_command_to_paste() {
         let portal = Portal::new(crate::catalog::fake_catalog_with_foreign(), "secret".into());
-        let catalog = portal.catalog();
-        let idx = catalog
-            .sessions
-            .iter()
-            .position(|s| s.meta.id == "w")
-            .unwrap();
-        let body = format!("{{\"index\":{idx}}}");
-        let res = route(&post("/api/launch", body.as_bytes()), &portal);
+        let res = route(&post("/api/launch", br#"{"id":"w"}"#), &portal);
         assert_eq!(res.status, 409);
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
         assert!(value["command"].as_str().unwrap().contains("--resume"));
+    }
+
+    #[test]
+    fn launching_a_session_the_catalog_shows_as_live_is_refused_with_the_pid_to_focus_instead() {
+        // "c" ("Running thing") is live under source "two", pid 4242 -- see
+        // `catalog::fake_catalog`. This guard must fire before the launch would otherwise
+        // proceed, and must never reach `spawn_in_new_terminal`.
+        let res = route(&post("/api/launch", br#"{"id":"c"}"#), &portal());
+        assert_eq!(res.status, 409);
+        let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+        assert_eq!(value["pid"], 4242);
+        assert!(value["command"].as_str().unwrap().contains("--resume"));
+        assert!(value["shell"].is_string());
     }
 
     #[test]
@@ -308,16 +345,20 @@ mod tests {
             400
         );
         assert_eq!(
-            route(&post("/api/launch", br#"{"index":999}"#), &portal()).status,
+            route(
+                &post("/api/launch", br#"{"id":"does-not-exist"}"#),
+                &portal()
+            )
+            .status,
             404
         );
     }
 
     #[test]
-    fn parses_the_index_out_of_a_body() {
-        assert_eq!(body_index(br#"{"index":12}"#), Some(12));
-        assert_eq!(body_index(br#"{"other":1}"#), None);
-        assert_eq!(body_index(b""), None);
+    fn parses_the_session_id_out_of_a_body() {
+        assert_eq!(body_session_id(br#"{"id":"abc"}"#), Some("abc".to_string()));
+        assert_eq!(body_session_id(br#"{"other":1}"#), None);
+        assert_eq!(body_session_id(b""), None);
     }
 
     #[test]
@@ -504,11 +545,11 @@ mod tests {
     }
 
     #[test]
-    fn messages_are_served_for_a_session_index() {
-        // Index 0 is "Docker build cache" (fake_catalog sorts by last_ts descending), whose
-        // fixture messages are a known user/assistant pair — pin their content, not just that
-        // `messages` happens to be an array, which `{"messages":[]}` would also satisfy.
-        let res = route(&get("/api/messages", "index=0"), &portal());
+    fn messages_are_served_for_a_session_id() {
+        // "a" is "Docker build cache", whose fixture messages are a known user/assistant pair —
+        // pin their content, not just that `messages` happens to be an array, which
+        // `{"messages":[]}` would also satisfy.
+        let res = route(&get("/api/messages", "id=a"), &portal());
         assert_eq!(res.status, 200);
         let value: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
         let messages = value["messages"].as_array().unwrap();
@@ -520,9 +561,9 @@ mod tests {
     }
 
     #[test]
-    fn an_out_of_range_index_is_a_404_not_a_panic() {
+    fn an_unknown_id_is_a_404_not_a_panic() {
         assert_eq!(
-            route(&get("/api/messages", "index=999"), &portal()).status,
+            route(&get("/api/messages", "id=does-not-exist"), &portal()).status,
             404
         );
         assert_eq!(route(&get("/api/messages", ""), &portal()).status, 400);

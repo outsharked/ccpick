@@ -903,6 +903,18 @@ mod readme_shot {
         }
     }
 
+    /// DIM applies to the foreground only: fading the whole span would wash out the selection
+    /// band's background too, which no terminal does.
+    fn dim(fg: &str, bg: &str) -> String {
+        let channel = |hex: &str, i: usize| {
+            u8::from_str_radix(&hex[1 + i * 2..3 + i * 2], 16).unwrap_or(0) as f32
+        };
+        let mixed: Vec<u8> = (0..3)
+            .map(|i| (channel(fg, i) * 0.62 + channel(bg, i) * 0.38).round() as u8)
+            .collect();
+        format!("#{:02x}{:02x}{:02x}", mixed[0], mixed[1], mixed[2])
+    }
+
     fn esc(s: &str) -> String {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -1083,12 +1095,12 @@ lands, so the session is only there on a slow machine. Awaiting the redirect fix
                 if reversed {
                     std::mem::swap(&mut fg, &mut bg);
                 }
+                if cell.modifier.contains(Modifier::DIM) {
+                    fg = dim(&fg, &bg);
+                }
                 let mut style = format!("color:{fg}");
                 if bg != "#16181d" {
                     style.push_str(&format!(";background:{bg}"));
-                }
-                if cell.modifier.contains(Modifier::DIM) {
-                    style.push_str(";opacity:.68");
                 }
                 if cell.modifier.contains(Modifier::BOLD) {
                     style.push_str(";font-weight:700");

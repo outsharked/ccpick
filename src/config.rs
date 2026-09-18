@@ -147,6 +147,39 @@ command = ["wrap", "--p"]
     }
 
     #[test]
+    fn accepts_a_codex_source_and_agent_table() {
+        let cfg = parse_config(
+            r#"
+[codex]
+home = false
+
+[[source]]
+agent = "codex"
+name = "work"
+config_dir = "~/.codex-work"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sources.len(), 1);
+        assert_eq!(cfg.sources[0].agent, "codex");
+        assert_eq!(cfg.sources[0].name.as_deref(), Some("work"));
+        assert!(cfg.agents.contains_key("codex"));
+        #[derive(serde::Deserialize, Default, Debug, PartialEq)]
+        #[serde(default)]
+        struct CodexTable {
+            home: bool,
+        }
+        let settings = Settings {
+            file: cfg,
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.agent_table::<CodexTable>("codex").unwrap(),
+            CodexTable { home: false }
+        );
+    }
+
+    #[test]
     fn empty_config_is_default() {
         let cfg = parse_config("").unwrap();
         assert!(cfg.sources.is_empty());

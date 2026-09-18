@@ -215,11 +215,4 @@ mod tests {
         assert_eq!(plan.argv, vec!["codex", "resume", "abc-123"]);
         assert_eq!(plan.cwd, PathBuf::from("/home/me/proj"));
     }
-
-    #[test]
-    fn registry_omits_codex_until_it_is_wired_in() {
-        // Task 4 registers CodexProvider in providers::all(); until then this provider is only
-        // reachable directly, as every other test in this module does.
-        assert!(crate::providers::all().iter().all(|p| p.id() != "codex"));
-    }
 }

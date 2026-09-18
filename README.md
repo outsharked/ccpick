@@ -1,19 +1,19 @@
 # ccpick
 
-Fast TUI to find and resume Claude Code sessions across every config directory you use —
-multiple [ccs](https://github.com/kaitranntt/ccs) accounts, `~/.claude`, `$CLAUDE_CONFIG_DIR`,
-or any directory you configure. It doesn't manage sessions; it finds one and hands off to the
-right launcher.
+Fast TUI to find and resume Claude Code and Codex CLI sessions across every config directory
+you use — multiple [ccs](https://github.com/kaitranntt/ccs) accounts, `~/.claude`,
+`$CLAUDE_CONFIG_DIR`, `~/.codex`, or any directory you configure. It doesn't manage sessions;
+it finds one and hands off to the right launcher.
 
 ![ccpick](docs/screenshot.png)
 
-- **One list for every account.** ccs accounts, `~/.claude`, `$CLAUDE_CONFIG_DIR` and any
-  directory you configure. Accounts that share a transcript store are listed once, and can be
-  resumed through any of them (`Ctrl-A` picks).
+- **One list for every account.** ccs accounts, `~/.claude`, `$CLAUDE_CONFIG_DIR`, `~/.codex`
+  and any directory you configure. Accounts that share a transcript store are listed once, and
+  can be resumed through any of them (`Ctrl-A` picks).
 - **Search as you type.** Titles, project paths, branches and first prompts filter instantly;
   matches inside the conversations themselves arrive a moment later, below a divider.
-- **Shows what's running.** Live sessions are marked, with their pid, so you never resume one
-  twice.
+- **Shows what's running.** Live Claude sessions are marked, with their pid, so you never resume
+  one twice. Codex sessions don't have this yet — see [Codex](#codex) below.
 - **Enter does the right thing.** A stopped session resumes through its own launcher; a running
   one brings its terminal to the front instead, switching to the right tab.
 - **Reads across Windows and WSL.** Each side lists the other's sessions, and running state is
@@ -113,6 +113,21 @@ Discovered in order (earlier wins as the default launcher):
 Sources whose `projects/` resolve to the same directory share one transcript store, so each
 session is listed once and can be resumed through any of them.
 
+## Codex
+
+Codex CLI threads from `~/.codex` (or `$CODEX_HOME`) are listed alongside Claude's, read from
+Codex's own session index (`state_<n>.sqlite`) rather than the rollout files directly. Only
+threads started from the CLI or the editor are shown — Codex spawns subagent threads as children
+of a run that nobody resumes on their own, so those are left out, along with threads that never
+got a title or a first message.
+
+A thread's title, cwd and other metadata are cached against its rollout file's size and mtime,
+same as Claude's. Renaming a thread in Codex without adding a new message to it won't update
+the title here until the next message arrives, or you run with `--no-cache`.
+
+Codex sessions aren't yet detected as running — that's a follow-up, not implemented here — so
+Enter always resumes them rather than switching to a live terminal.
+
 ## Windows and WSL
 
 On a Windows machine with WSL, ccpick also lists the other side's sessions:
@@ -152,10 +167,19 @@ A `[[source]]` may point at the other side's path; its environment is inferred, 
 ccs = true    # auto-detect ccs accounts
 home = true   # include ~/.claude and $CLAUDE_CONFIG_DIR
 
+[codex]
+home = true   # include ~/.codex and $CODEX_HOME
+
 [[source]]
 name = "work"
 config_dir = "~/.claude-work"
 # command = ["my-wrapper", "--profile", "work"]   # default: claude with CLAUDE_CONFIG_DIR
+
+[[source]]
+agent = "codex"
+name = "codex-work"
+config_dir = "~/.codex-work"
+# command = ["my-wrapper", "--profile", "work"]   # default: codex with CODEX_HOME
 ```
 
 Metadata is cached in `~/.cache/ccpick/meta.json` (`--no-cache` to bypass).
@@ -208,7 +232,8 @@ git push --follow-tags     # CI builds binaries and publishes the GitHub release
 ## Design
 
 See `docs/specs/2026-09-16-ccpick-design.md`. Agent-specific code lives behind a
-`Provider` trait in `src/providers/`, so other agents (e.g. Codex CLI) can be added later.
+`Provider` trait in `src/providers/` — Claude Code and Codex CLI are both built on it today, and
+other agents can be added the same way.
 
 ## License
 

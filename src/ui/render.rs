@@ -893,46 +893,130 @@ mod readme_shot {
                 (Role::User, "the login test fails about one run in five"),
                 (
                     Role::Assistant,
-                    "It races the session cookie write. Awaiting the redirect fixes it.",
+                    "It races the session cookie write: the assertion runs before the redirect \
+lands, so the session is only there on a slow machine. Awaiting the redirect fixes it.",
                 ),
             ],
         );
-        p.add_session(
-            "/s",
-            "b2",
-            "Postgres connection pool sizing",
-            NOW - 2 * DAY,
-            NOW - 26 * HOUR,
-            &[],
-        );
-        p.add_session(
-            "/t",
-            "c3",
-            "Blog post about the release",
-            NOW - 6 * DAY,
-            NOW - 5 * DAY,
-            &[],
-        );
-        p.add_session(
-            "/s",
-            "d4",
-            "Terraform state migration",
-            NOW - 9 * DAY,
-            NOW - 8 * DAY,
-            &[],
-        );
+        let sessions: &[(&str, &str, &str, &str, i64, i64)] = &[
+            (
+                "/s",
+                "b2",
+                "Postgres connection pool sizing",
+                "~/code/web-app",
+                2 * DAY,
+                26 * HOUR,
+            ),
+            (
+                "/s",
+                "c3",
+                "Rate limiting the public API",
+                "~/code/web-app",
+                2 * DAY,
+                2 * DAY,
+            ),
+            (
+                "/t",
+                "d4",
+                "Blog post about the release",
+                "~/notes",
+                6 * DAY,
+                3 * DAY,
+            ),
+            (
+                "/s",
+                "e5",
+                "Terraform state migration",
+                "~/code/infra",
+                9 * DAY,
+                4 * DAY,
+            ),
+            (
+                "/s",
+                "f6",
+                "Flaky DNS in the staging cluster",
+                "~/code/infra",
+                9 * DAY,
+                5 * DAY,
+            ),
+            (
+                "/t",
+                "g7",
+                "Weekend photo import script",
+                "~/code/scratch",
+                11 * DAY,
+                6 * DAY,
+            ),
+            (
+                "/s",
+                "h8",
+                "Upgrade the build to the 2024 edition",
+                "~/code/web-app",
+                14 * DAY,
+                8 * DAY,
+            ),
+            (
+                "/s",
+                "i9",
+                "Cache invalidation on deploy",
+                "~/code/web-app",
+                16 * DAY,
+                12 * DAY,
+            ),
+            (
+                "/t",
+                "j10",
+                "Home server backup rotation",
+                "~/code/scratch",
+                20 * DAY,
+                15 * DAY,
+            ),
+            (
+                "/s",
+                "k11",
+                "Postmortem for the checkout outage",
+                "~/notes",
+                24 * DAY,
+                20 * DAY,
+            ),
+            (
+                "/s",
+                "l12",
+                "Split the monolith test suite",
+                "~/code/web-app",
+                30 * DAY,
+                26 * DAY,
+            ),
+            (
+                "/t",
+                "m13",
+                "Reading list cleanup",
+                "~/notes",
+                40 * DAY,
+                33 * DAY,
+            ),
+        ];
+        for (store, id, title, cwd, first, last) in sessions {
+            p.add_session(store, id, title, NOW - first, NOW - last, &[]);
+            p.set_cwd(store, id, Some(cwd));
+        }
         p.set_cwd("/s", "a1", Some("~/code/web-app"));
-        p.set_cwd("/s", "b2", Some("~/code/web-app"));
-        p.set_cwd("/t", "c3", Some("~/notes"));
-        p.set_cwd("/s", "d4", Some("~/code/infra"));
         p.records.insert(
             "work".into(),
-            vec![LaunchRecord {
-                pid: 48120,
-                session_id: "a1".into(),
-                started_at_ms: NOW - 3 * HOUR,
-                alive: true,
-            }],
+            vec![
+                LaunchRecord {
+                    pid: 48120,
+                    session_id: "a1".into(),
+                    started_at_ms: NOW - 3 * HOUR,
+                    alive: true,
+                },
+                LaunchRecord {
+                    pid: 48771,
+                    session_id: "c3".into(),
+                    started_at_ms: NOW - 2 * DAY,
+                    alive: true,
+                },
+            ],
         );
         let mut catalog = crate::catalog::build_fake(p);
         // The preview labels assistant turns with the agent name; show the real one.
@@ -940,7 +1024,7 @@ mod readme_shot {
             session.meta.agent = "claude".into();
         }
         let mut app = App::new(Arc::new(catalog), "");
-        let (w, h) = (104u16, 17u16);
+        let (w, h) = (186u16, 30u16);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| draw(f, &mut app, NOW)).unwrap();
         let buffer = terminal.backend().buffer().clone();

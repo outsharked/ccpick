@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod codex;
 #[cfg(test)]
 pub mod fake;
 

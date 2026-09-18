@@ -11,8 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-/// The page, embedded so the binary is self-contained.
+/// The page and its assets, embedded so the binary is self-contained and the page works with no
+/// network access.
 pub const PAGE: &str = include_str!("assets/index.html");
+pub const STYLE: &str = include_str!("assets/app.css");
+pub const SCRIPT: &str = include_str!("assets/app.js");
 
 pub struct WebOptions {
     pub port: u16,

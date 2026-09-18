@@ -1,1 +1,55 @@
-<!doctype html><title>ccpick</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>ccpick</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <span id="brand">ccpick</span>
+    <div id="searchbox">
+      <span id="prompt" aria-hidden="true">&gt;</span>
+      <input
+        id="search"
+        type="text"
+        placeholder="Search sessions"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        aria-label="Search sessions"
+      />
+    </div>
+    <span id="counts"></span>
+  </header>
+  <main id="body">
+    <section id="list-pane" aria-label="Sessions">
+      <h2 class="pane-title">Sessions</h2>
+      <ul id="session-list" role="listbox" tabindex="0" aria-label="Sessions"></ul>
+    </section>
+    <section id="preview-pane" aria-label="Conversation">
+      <h2 class="pane-title">Conversation</h2>
+      <div id="preview"><p class="empty">no sessions match</p></div>
+    </section>
+  </main>
+  <footer id="statusline" role="status" aria-live="polite"></footer>
+</div>
+
+<dialog id="command-dialog">
+  <p id="dialog-message"></p>
+  <pre id="dialog-command"></pre>
+  <p id="dialog-note" class="dialog-note" hidden></p>
+  <div id="dialog-actions">
+    <button id="dialog-focus" type="button" hidden>Focus instead</button>
+    <button id="dialog-copy" type="button">Copy command</button>
+    <button id="dialog-close" type="button">Close</button>
+  </div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

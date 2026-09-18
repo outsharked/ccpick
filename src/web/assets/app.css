@@ -1,0 +1,399 @@
+/* ccpick web portal — a companion to the TUI, styled like a terminal rather than a generic
+   web app. Plain CSS, no build step: light and dark come from prefers-color-scheme only. */
+
+:root {
+  --bg: #fbfbfa;
+  --bg-alt: #ffffff;
+  --fg: #1b1d23;
+  --fg-dim: #6b7280;
+  --border: #d9d9d6;
+  --accent: #0d7490;
+  --green: #1a8f4f;
+  --yellow-fg: #6b4e00;
+  --yellow-bg: #f6d365;
+  --danger: #b3261e;
+  --select-bg: #1b1d23;
+  --select-fg: #fbfbfa;
+  --mark-bg: #f6d365;
+  --mark-fg: #1b1d23;
+  --shadow: rgba(0, 0, 0, 0.18);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --bg-alt: #1b1d23;
+    --fg: #f3f4f6;
+    --fg-dim: #a9b1bd;
+    --border: #2a2d35;
+    --accent: #4fc1d9;
+    --green: #3fd07b;
+    --yellow-fg: #e5c07b;
+    --yellow-bg: #4a3d1a;
+    --danger: #e06c75;
+    --select-bg: #f3f4f6;
+    --select-fg: #16181d;
+    --mark-bg: #e5c07b;
+    --mark-fg: #1b1d23;
+    --shadow: rgba(0, 0, 0, 0.5);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* --- Top bar: brand, search, counts (the TUI's title bar + query line) --- */
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+#brand {
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+#searchbox {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.3rem 0.6rem;
+}
+
+#prompt {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+#search {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+}
+
+#search::placeholder {
+  color: var(--fg-dim);
+}
+
+#counts {
+  color: var(--fg-dim);
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+/* --- Two panes, like the TUI's list/preview split --- */
+
+#body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+#list-pane {
+  flex: 0 0 42%;
+  min-width: 220px;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+
+#preview-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+@media (max-width: 720px) {
+  #body {
+    flex-direction: column;
+  }
+  #list-pane {
+    flex: 1 1 50%;
+    max-width: none;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  #preview-pane {
+    flex: 1 1 50%;
+  }
+}
+
+.pane-title {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+#list-pane:focus-within .pane-title,
+#preview-pane:focus-within .pane-title {
+  color: var(--accent);
+}
+
+/* --- Session list --- */
+
+#session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+#session-list .row {
+  display: block;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  border-bottom: 1px solid transparent;
+}
+
+#session-list .row:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+#session-list .row .title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+#session-list .marker {
+  flex: 0 0 auto;
+  width: 0.7em;
+  color: var(--green);
+}
+
+#session-list .title {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#session-list .detail {
+  margin-top: 0.15rem;
+  padding-left: 1.1em;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#session-list .detail .running-tag {
+  color: var(--green);
+  font-weight: 700;
+}
+
+#session-list .row.selected {
+  background: var(--select-bg);
+  color: var(--select-fg);
+}
+
+#session-list .row.selected .title,
+#session-list .row.selected .detail,
+#session-list .row.selected .marker {
+  color: inherit;
+}
+
+#session-list .row.selected .marker {
+  color: var(--green);
+}
+
+#session-list .divider {
+  padding: 0.35rem 0.75rem;
+  color: var(--fg-dim);
+  text-align: center;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+#session-list mark {
+  background: var(--mark-bg);
+  color: var(--mark-fg);
+  border-radius: 2px;
+}
+
+#session-list:focus-visible,
+#session-list .row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* --- Conversation preview --- */
+
+#preview {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0.6rem 0.9rem;
+}
+
+#preview .empty {
+  color: var(--fg-dim);
+}
+
+#preview .header-line {
+  color: var(--fg-dim);
+}
+
+#preview .header-id {
+  color: var(--fg-dim);
+  word-break: break-all;
+}
+
+#preview .header-rule {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.5rem 0;
+}
+
+#preview .message {
+  margin-bottom: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#preview .message .role {
+  font-weight: 700;
+}
+
+#preview .message.user .role {
+  color: var(--accent);
+}
+
+#preview .message.assistant .role {
+  color: #a561d1;
+}
+
+@media (prefers-color-scheme: dark) {
+  #preview .message.assistant .role {
+    color: #c586e0;
+  }
+}
+
+/* --- Status line --- */
+
+#statusline {
+  padding: 0.3rem 0.75rem;
+  min-height: 1.4em;
+  font-size: 12px;
+  color: var(--yellow-fg);
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+#statusline:empty::before {
+  content: "\00a0";
+}
+
+/* --- Command dialog (paste-ready fallback / already-running conflict) --- */
+
+dialog#command-dialog {
+  max-width: min(90vw, 640px);
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  background: var(--bg-alt);
+  color: var(--fg);
+  box-shadow: 0 8px 30px var(--shadow);
+}
+
+dialog#command-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+#dialog-message {
+  margin: 0 0 0.6rem;
+}
+
+#dialog-command {
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.dialog-note {
+  color: var(--yellow-fg);
+  margin: 0 0 0.6rem;
+}
+
+#dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+#dialog-actions button {
+  font: inherit;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+#dialog-actions button:hover {
+  border-color: var(--accent);
+}
+
+#dialog-actions button:focus-visible,
+#search:focus-visible,
+#session-list:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#searchbox:focus-within {
+  border-color: var(--accent);
+}

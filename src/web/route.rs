@@ -125,15 +125,25 @@ pub fn route(req: &Req, portal: &Portal) -> Res {
     if !host_is_allowed(req.host) {
         return Res::error(403, "unrecognized Host header");
     }
-    // The page itself carries no token: the token arrives in its URL and the script it loads
-    // sends it on every call after that.
-    if req.path == "/" && req.method == "GET" {
-        let mut res = Res::text(200, "text/html; charset=utf-8", crate::web::PAGE);
-        // The token lives in this page's own URL. Without this, any external subresource or
-        // outbound link a later task adds would leak it via the Referer header.
-        res.headers
-            .push(("Referrer-Policy".into(), "no-referrer".into()));
-        return res;
+    // The page and its assets carry no token: the browser fetches all three (a navigation, then
+    // a `<link>` and a `<script>` tag) before any script has run to attach `X-CCPick-Token`. The
+    // token itself arrives embedded in the page's own URL instead.
+    if req.method == "GET" {
+        match req.path {
+            "/" => {
+                let mut res = Res::text(200, "text/html; charset=utf-8", crate::web::PAGE);
+                // The token lives in this page's own URL. Without this, an external subresource
+                // or outbound link the page adds would leak it via the Referer header.
+                res.headers
+                    .push(("Referrer-Policy".into(), "no-referrer".into()));
+                return res;
+            }
+            "/app.css" => return Res::text(200, "text/css; charset=utf-8", crate::web::STYLE),
+            "/app.js" => {
+                return Res::text(200, "text/javascript; charset=utf-8", crate::web::SCRIPT);
+            }
+            _ => {}
+        }
     }
     // A page on another origin must not be able to reach a server that can spawn processes,
     // even if it somehow learned the token. Checked before the token so a foreign origin is
@@ -473,6 +483,45 @@ mod tests {
         let mut req = get("/api/sessions", "");
         req.method = "POST";
         assert_eq!(route(&req, &portal()).status, 404);
+    }
+
+    #[test]
+    fn the_page_and_its_assets_are_served() {
+        for (path, kind) in [
+            ("/", "text/html"),
+            ("/app.css", "text/css"),
+            ("/app.js", "text/javascript"),
+        ] {
+            let req = Req {
+                method: "GET",
+                path,
+                query: "",
+                token: None,
+                origin: None,
+                host: None,
+                body: b"",
+            };
+            let res = route(&req, &portal());
+            assert_eq!(res.status, 200, "{path}");
+            assert!(res.content_type.starts_with(kind), "{path}");
+            assert!(!res.body.is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn the_page_asks_for_the_token_to_be_stripped_from_the_address_bar() {
+        let req = Req {
+            method: "GET",
+            path: "/app.js",
+            query: "",
+            token: None,
+            origin: None,
+            host: None,
+            body: b"",
+        };
+        let body = String::from_utf8(route(&req, &portal()).body).unwrap();
+        assert!(body.contains("replaceState"));
+        assert!(body.contains("X-CCPick-Token"));
     }
 
     #[test]

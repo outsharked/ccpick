@@ -610,6 +610,26 @@ mod tests {
     }
 
     #[test]
+    fn the_page_can_filter_by_live_and_by_environment() {
+        let req = Req {
+            method: "GET",
+            path: "/app.js",
+            query: "",
+            token: None,
+            origin: None,
+            host: None,
+            body: b"",
+        };
+        let script = String::from_utf8(route(&req, &portal()).body).unwrap();
+        assert!(script.contains("liveOnly"));
+        assert!(script.contains("passesFilters"));
+        // Filtering is local to the view, so it must not add a server round trip.
+        assert!(!script.contains("/api/sessions?"));
+        // Ctrl-L mirrors the TUI's own live-only key.
+        assert!(script.contains("\"l\""));
+    }
+
+    #[test]
     fn the_page_is_served_without_a_token_because_the_token_arrives_in_its_url() {
         let req = Req {
             method: "GET",

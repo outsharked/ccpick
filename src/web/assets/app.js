@@ -36,6 +36,7 @@
     search: document.getElementById("search"),
     counts: document.getElementById("counts"),
     refresh: document.getElementById("refresh"),
+    filterbar: document.getElementById("filterbar"),
     list: document.getElementById("session-list"),
     preview: document.getElementById("preview"),
     status: document.getElementById("statusline"),
@@ -56,6 +57,10 @@
     order: [], // session ids, ranked by /api/search's `matches`
     hits: [], // [{id, snippet}] from /api/search
     selectedId: null,
+    // Filters are applied here rather than server-side: they are a property of this view, not of
+    // the catalog, and doing them locally keeps them instant and composable with the search.
+    liveOnly: false,
+    envs: new Set(), // empty means every environment
   };
 
   // Every response carrying a body this stale would be worse than showing nothing: a slow
@@ -138,7 +143,67 @@
 
   function updateCounts() {
     const running = state.sessions.filter((s) => s.running).length;
-    els.counts.textContent = `${state.sessions.length} sessions · ${running} running`;
+    const shown = state.sessions.filter(passesFilters).length;
+    const total = state.sessions.length;
+    const sessions = shown === total ? `${total} sessions` : `${shown} of ${total} sessions`;
+    els.counts.textContent = `${sessions} · ${running} running`;
+  }
+
+  // `windows`, `linux`, `macos`, `wsl:<distro>` — the ids the server sends, as a person reads
+  // them. Mirrors Env::display_name on the Rust side.
+  function envLabel(env) {
+    if (env === "windows") return "Windows";
+    if (env === "linux") return "Linux";
+    if (env === "macos") return "macOS";
+    if (env.startsWith("wsl:")) return `WSL (${env.slice(4)})`;
+    return env;
+  }
+
+  function passesFilters(session) {
+    if (state.liveOnly && !session.running) return false;
+    if (state.envs.size && !state.envs.has(session.env)) return false;
+    return true;
+  }
+
+  function chip(label, pressed, onToggle) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", pressed ? "true" : "false");
+    button.addEventListener("click", onToggle);
+    return button;
+  }
+
+  function renderFilters() {
+    els.filterbar.innerHTML = "";
+    els.filterbar.appendChild(
+      chip("live only", state.liveOnly, () => {
+        state.liveOnly = !state.liveOnly;
+        renderFilters();
+        renderList();
+      }),
+    );
+    // One chip per environment actually present, so a single-environment machine sees none of
+    // this and the row only appears when it can do something.
+    const present = [...new Set(state.sessions.map((s) => s.env))].sort();
+    if (present.length > 1) {
+      for (const env of present) {
+        els.filterbar.appendChild(
+          chip(envLabel(env), state.envs.has(env), () => {
+            if (state.envs.has(env)) state.envs.delete(env);
+            else state.envs.add(env);
+            renderFilters();
+            renderList();
+          }),
+        );
+      }
+    }
+    // Environments can vanish between refreshes; a filter pinned to one that is gone would hide
+    // everything with no way to see why.
+    for (const env of [...state.envs]) {
+      if (!present.includes(env)) state.envs.delete(env);
+    }
   }
 
   // The rows to draw: matches in ranked order, then (if there's a divider's worth of them) the
@@ -147,13 +212,15 @@
     const rows = [];
     for (const id of state.order) {
       const session = state.byId.get(id);
-      if (session) rows.push({ session, snippet: null });
+      if (session && passesFilters(session)) rows.push({ session, snippet: null });
     }
-    if (state.hits.length) {
+    const hits = state.hits
+      .map((hit) => ({ hit, session: state.byId.get(hit.id) }))
+      .filter(({ session }) => session && passesFilters(session));
+    if (hits.length) {
       rows.push({ divider: true });
-      for (const hit of state.hits) {
-        const session = state.byId.get(hit.id);
-        if (session) rows.push({ session, snippet: hit.snippet });
+      for (const { hit, session } of hits) {
+        rows.push({ session, snippet: hit.snippet });
       }
     }
     return rows;
@@ -356,6 +423,7 @@
       state.byId = new Map(state.sessions.map((s) => [s.id, s]));
       state.warnings = data.warnings || [];
       renderWarnings();
+      renderFilters();
       await runSearch(state.query);
     } catch {
       setStatus("could not reach ccpick", { persist: true });
@@ -458,6 +526,14 @@
     }
     // F5 and Ctrl-R refresh the sessions rather than reloading the page: this is an app, and a
     // reload would throw away the preview and the query to fetch the same three files again.
+    // Ctrl-L is the TUI's live-only filter; keep the two interfaces in step.
+    if ((event.ctrlKey || event.metaKey) && event.key === "l") {
+      event.preventDefault();
+      state.liveOnly = !state.liveOnly;
+      renderFilters();
+      renderList();
+      return;
+    }
     if (event.key === "F5" || ((event.ctrlKey || event.metaKey) && event.key === "r")) {
       event.preventDefault();
       refresh();
@@ -488,6 +564,7 @@
   els.refresh.addEventListener("click", refresh);
 
   showEmptyPreview();
+  renderFilters();
   setUpdatesPending(false);
   loadSessions();
   subscribeEvents();

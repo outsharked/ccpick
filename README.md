@@ -95,6 +95,11 @@ that build has no `web` subcommand.
 Since `web` is a subcommand rather than a flag, searching for the literal word "web"
 needs `ccpick --list -- web` — plain `ccpick --list web` starts the portal instead.
 
+Filter the list with the chips under the search box: live sessions only, and — when a
+machine has sessions in more than one environment — by Windows, WSL or Linux. `Ctrl-L` toggles
+the live-only filter, as it does in the TUI. Filtering happens in the page, so it is instant and
+combines with whatever you have typed.
+
 ## Sources
 
 Discovered in order (earlier wins as the default launcher):

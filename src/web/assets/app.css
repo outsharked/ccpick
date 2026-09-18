@@ -167,6 +167,43 @@ body {
   white-space: nowrap;
 }
 
+/* Filter chips: one row under the header, only drawn when there is something to filter. */
+#filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+#filterbar:empty {
+  display: none;
+}
+
+.chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+
+.chip[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg-alt);
+}
+
 /* --- Two panes, like the TUI's list/preview split --- */
 
 #body {

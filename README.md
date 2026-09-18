@@ -42,7 +42,7 @@ conversation text appear below a divider shortly after.
 
 | Key | Action |
 |---|---|
-| `Enter` | Resume (blocked if already running or project dir is gone) |
+| `Enter` | Resume, or focus the terminal of an already-running session (never resumes it twice) |
 | `Ctrl-A` | Cycle which source/account resumes the session |
 | `Ctrl-R` | Running sessions only |
 | `Ctrl-S` | Sort by last activity / created |
@@ -73,6 +73,14 @@ On a Windows machine with WSL, ccpick also lists the other side's sessions:
 - On Windows, sessions in *running* WSL distros appear as `wsl:<name>` (or `<distro>:<name>` with several distros). Stopped distros aren't started.
 
 Those sessions are searchable like any other. Pressing Enter on one opens a dialog with the command to paste into a shell on the other side (`c` copies it).
+
+Pressing Enter on a session that is *running* brings its terminal to the front instead of
+resuming it: ccpick finds the window hosting that session and, when the terminal shows session
+titles on its tabs (as Windows Terminal does), switches to the matching tab. It takes a second or
+two, since the work happens through PowerShell. If the tab can't be identified — no matching
+title, or two sessions with the same one — the window is raised without changing tabs, and if no
+window is found at all the status line just reports that the session is running. Focusing a WSL
+session's terminal from a Windows-hosted ccpick isn't supported.
 
 ```toml
 [environments]

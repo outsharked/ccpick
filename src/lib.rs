@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod clipboard;
 pub mod config;
 pub mod env;
+pub mod focus;
 pub mod format;
 pub mod homes;
 pub mod launch;

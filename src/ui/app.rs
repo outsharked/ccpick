@@ -34,6 +34,13 @@ pub enum Action {
     Launch(LaunchPlan),
     Search(String),
     Copy(String),
+    /// Focus the terminal running this session: its pid, the source it was started from, and its
+    /// title, which terminals show on the tab.
+    Focus {
+        pid: u32,
+        source: usize,
+        title: String,
+    },
 }
 
 /// Shown instead of launching when a session belongs to another environment.
@@ -391,11 +398,16 @@ impl App {
         };
         let session = &self.catalog.sessions[idx];
         if let Some((pid, source)) = session.live {
+            // A running session can't be resumed a second time; focus its terminal instead.
             self.status = Some(format!(
                 "running in {} (pid {pid})",
                 self.catalog.sources[source].name
             ));
-            return Action::None;
+            let title = session.meta.title.clone();
+            return match u32::try_from(pid) {
+                Ok(pid) => Action::Focus { pid, source, title },
+                Err(_) => Action::None,
+            };
         }
         let source = self.launch_source(idx);
         if !self.catalog.is_launchable(source) {
@@ -597,10 +609,29 @@ mod tests {
     }
 
     #[test]
-    fn running_session_is_blocked() {
+    fn running_session_is_never_resumed() {
         let mut a = app("");
         a.selected = 2;
-        assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
+        // Focusing is fine; resuming a second copy of a live session is not.
+        assert!(!matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Launch(_)
+        ));
+        assert_eq!(a.status.as_deref(), Some("running in two (pid 4242)"));
+    }
+
+    #[test]
+    fn enter_on_a_running_session_focuses_its_terminal() {
+        let mut a = app("");
+        a.selected = 2; // session "c", running as pid 4242 via source "two"
+        assert_eq!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Focus {
+                pid: 4242,
+                source: 1,
+                title: "Running thing".into()
+            }
+        );
         assert_eq!(a.status.as_deref(), Some("running in two (pid 4242)"));
     }
 

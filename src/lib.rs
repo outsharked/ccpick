@@ -16,3 +16,5 @@ pub mod shell;
 #[cfg(test)]
 pub mod testutil;
 pub mod ui;
+#[cfg(feature = "web")]
+pub mod web;

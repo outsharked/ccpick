@@ -109,6 +109,12 @@ pub fn listable_threads(db: &Path) -> anyhow::Result<Vec<Thread>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Re-exported so `providers::codex::sources`'s tests build on the exact same fixture as this
+/// module's own tests, rather than a second one that could drift from the schema this reader
+/// depends on.
+#[cfg(test)]
+pub(crate) use tests::tests_fixture;
+
 #[cfg(test)]
 mod tests {
     use super::*;

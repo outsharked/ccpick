@@ -59,12 +59,19 @@ Threads with neither a `name` nor a `title` and no messages are dropped as still
 A Codex source is `~/.codex`, or `$CODEX_HOME` when set. `.codex` joins the provider's home
 markers, so the existing cross-environment scan finds a Codex home in a WSL distro from Windows
 and under `/mnt/c/Users/<user>` from WSL, exactly as it already does for `.claude`. The source
-is named `codex`, and `codex:<label>` where a home needs distinguishing, following the naming
+is named `codex`, and `<label>:codex` where a home needs distinguishing, following the naming
 the Claude provider already uses for `win:` and `wsl:` homes.
 
 `[codex] home = true` in `~/.config/ccpick/config.toml` toggles auto-discovery, mirroring
-`[claude]`. A `[[source]]` entry with `agent = "codex"` already works — the config schema has
-carried an `agent` field since the first release, and nothing about it needs to change.
+`[claude]`. The config schema's `agent` field is per-provider, not shared infrastructure: each
+provider's `discover_sources` only picks up `[[source]]` entries whose `agent` matches its own
+id, the same way `src/providers/claude/sources.rs` already does for `agent = "claude"`. The
+Codex provider mirrors that filter for `agent = "codex"`, so a configured entry naming Codex is
+honoured; before this, such an entry was silently dropped, and once a Codex provider is
+registered it does not even earn the "unknown agent" warning, since some provider now claims
+that id. `--config-dir` (`settings.cli_config_dirs`) stays claimed by the Claude provider only —
+it carries no `agent`, and letting Codex claim it too would mint two sources for one directory.
+Naming a Codex directory outside the home requires an explicit `[[source]]` entry.
 
 ## Session fields
 

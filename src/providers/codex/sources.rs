@@ -112,6 +112,45 @@ pub fn discover(settings: &Settings, home: &Home) -> anyhow::Result<Discovery> {
         });
     }
 
+    // `--config-dir` is claimed by the Claude provider (it carries no `agent`, so only one
+    // provider may claim it — otherwise every use would mint a source for each registered
+    // provider pointing at the same directory). An explicit `[[source]] agent = "codex"` entry
+    // has no such ambiguity, so it is the only way to name a Codex directory outside the home.
+    if home.is_native() {
+        for sc in settings.file.sources.iter().filter(|s| s.agent == AGENT) {
+            let dir = settings.expand(&sc.config_dir);
+            let name = sc.name.clone().unwrap_or_else(|| basename(&dir));
+            let env = match &sc.env {
+                Some(text) => Env::parse(text).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "source {name}: invalid env {text:?} (use windows, linux, macos or wsl:<distro>)"
+                    )
+                })?,
+                None => host.infer_env(&dir),
+            };
+            let env_home = if env == host.env {
+                settings.home.clone()
+            } else {
+                PathBuf::new()
+            };
+            let (launch, needs_config_dir_env) = match &sc.command {
+                Some(argv) if !argv.is_empty() => (
+                    LaunchSpec {
+                        argv_prefix: argv.clone(),
+                        ..Default::default()
+                    },
+                    false,
+                ),
+                _ => (bare_codex(), true),
+            };
+            candidates.push(Candidate {
+                source: source(name, dir, env, env_home, launch),
+                explicit: true,
+                needs_config_dir_env,
+            });
+        }
+    }
+
     let mut seen = HashSet::new();
     for Candidate {
         mut source,
@@ -241,6 +280,47 @@ mod tests {
         s.env
             .insert(ENV_CONFIG_DIR.into(), dir.display().to_string());
         s.file = parse_config("[codex]\nhome = false").unwrap();
+        assert!(discover(&s, &native(&s)).unwrap().sources.is_empty());
+    }
+
+    #[test]
+    fn configured_codex_source_is_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".codex-work")).unwrap();
+        let mut s = settings(tmp.path());
+        s.file = parse_config(
+            "[codex]\nhome = false\n\n[[source]]\nagent = \"codex\"\nname = \"work\"\nconfig_dir = \"~/.codex-work\"\ncommand = [\"wrap\", \"-x\"]\n",
+        )
+        .unwrap();
+        let d = discover(&s, &native(&s)).unwrap();
+        assert_eq!(names(&d), vec!["work"]);
+        assert_eq!(d.sources[0].agent, "codex");
+        assert_eq!(d.sources[0].launch.argv_prefix, vec!["wrap", "-x"]);
+        assert!(d.sources[0].launch.env_set.is_empty());
+    }
+
+    #[test]
+    fn configured_source_for_another_agent_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = settings(tmp.path());
+        s.file = parse_config(
+            "[codex]\nhome = false\n\n[[source]]\nname = \"work\"\nconfig_dir = \"~/.claude-work\"\n",
+        )
+        .unwrap();
+        // Default agent is "claude" (config.rs's default_agent), so this entry is not codex's.
+        assert!(discover(&s, &native(&s)).unwrap().sources.is_empty());
+    }
+
+    #[test]
+    fn cli_config_dirs_do_not_produce_a_codex_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = tmp.path().join("cli-dir");
+        fs::create_dir_all(&cli).unwrap();
+        let mut s = settings(tmp.path());
+        s.file = parse_config("[codex]\nhome = false").unwrap();
+        s.cli_config_dirs = vec![cli];
+        // --config-dir belongs to the Claude provider; Codex must not also claim it, or a single
+        // flag would mint one source per provider for the same directory.
         assert!(discover(&s, &native(&s)).unwrap().sources.is_empty());
     }
 

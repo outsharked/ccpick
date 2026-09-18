@@ -7,6 +7,21 @@ right launcher.
 
 ![ccpick](docs/screenshot.png)
 
+- **One list for every account.** ccs accounts, `~/.claude`, `$CLAUDE_CONFIG_DIR` and any
+  directory you configure. Accounts that share a transcript store are listed once, and can be
+  resumed through any of them (`Ctrl-A` picks).
+- **Search as you type.** Titles, project paths, branches and first prompts filter instantly;
+  matches inside the conversations themselves arrive a moment later, below a divider.
+- **Shows what's running.** Live sessions are marked, with their pid, so you never resume one
+  twice.
+- **Enter does the right thing.** A stopped session resumes through its own launcher; a running
+  one brings its terminal to the front instead, switching to the right tab.
+- **Reads across Windows and WSL.** Each side lists the other's sessions, and running state is
+  detected both ways. Where ccpick can't launch across the boundary it hands you the command to
+  paste (`c` copies it).
+- **Conversation preview.** Scroll the transcript beside the list before committing to it.
+- **Fast.** A warm start is under 100 ms on a few hundred transcripts; metadata is cached.
+
 ## Install
 
 Linux (x86_64, arm64) and macOS (Intel, Apple Silicon):

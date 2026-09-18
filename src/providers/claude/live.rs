@@ -96,11 +96,16 @@ mod tests {
     fn live_claude_process_is_alive() {
         let tmp = tempfile::tempdir().unwrap();
         let fake_claude = tmp.path().join("claude-fake");
-        fs::copy("/bin/sleep", &fake_claude).unwrap();
+        // Symlink rather than copy. Copying produced an executable this process had just had
+        // open for writing, and a sibling test thread forking in that window left the child
+        // holding an inherited write descriptor to it -- so exec failed with ETXTBSY ("Text
+        // file busy"), intermittently, under parallel load. A symlink writes no executable, so
+        // the race cannot arise; exec still reports argv[0] as this path, which is what the
+        // liveness check reads.
+        std::os::unix::fs::symlink("/bin/sleep", &fake_claude).unwrap();
         let mut child = Command::new(&fake_claude).arg("30").spawn().unwrap();
         // Wait for the exec to land rather than guessing at it: until it does, the child is
-        // still a fork of the test binary and /proc/<pid>/cmdline names the wrong program. A
-        // fixed sleep made this test fail under parallel load (issue #7).
+        // still a fork of the test binary and /proc/<pid>/cmdline names the wrong program.
         let pid = child.id() as i32;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {

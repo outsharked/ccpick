@@ -207,6 +207,21 @@ impl Catalog {
     }
 }
 
+/// Discovers homes and builds the catalog from settings. Shared by the CLI entry point and
+/// the web portal's refresh loop, which rebuilds on an interval.
+pub fn build_from_settings(settings: &Settings, cache: &mut Cache) -> anyhow::Result<Catalog> {
+    let providers = crate::providers::all();
+    let markers: Vec<&str> = providers
+        .iter()
+        .flat_map(|p| p.home_markers().iter().copied())
+        .collect();
+    let (homes, home_warnings) =
+        crate::homes::discover_homes(settings, &markers, crate::homes::running_distros);
+    let mut catalog = Catalog::build(providers, settings, &homes, cache)?;
+    catalog.warnings.extend(home_warnings);
+    Ok(catalog)
+}
+
 #[cfg(test)]
 pub fn fake_catalog() -> Catalog {
     use crate::model::{LaunchRecord, Role};
@@ -554,5 +569,18 @@ mod tests {
         let names: Vec<&str> = c.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["claude", "win:claude"]);
         assert_eq!(c.sessions.len(), 2);
+    }
+
+    #[test]
+    fn build_from_settings_discovers_nothing_in_an_empty_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            home: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut cache = Cache::in_memory();
+        let catalog = build_from_settings(&settings, &mut cache).unwrap();
+        assert!(catalog.sessions.is_empty());
+        assert!(catalog.sources.is_empty());
     }
 }

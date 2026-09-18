@@ -16,8 +16,14 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 const TICK: Duration = Duration::from_millis(50);
 
 /// Runs the TUI. Returns the plan to exec, or None if the user quit.
-pub fn run(catalog: Arc<Catalog>, query: &str) -> anyhow::Result<Option<LaunchPlan>> {
-    let worker = SearchWorker::spawn(catalog.clone(), DEBOUNCE);
+/// `rebuild` produces a fresh catalog for Ctrl-R. It is passed in rather than built here so the
+/// UI layer stays ignorant of settings, caches and providers.
+pub fn run(
+    catalog: Arc<Catalog>,
+    query: &str,
+    mut rebuild: impl FnMut() -> anyhow::Result<Catalog>,
+) -> anyhow::Result<Option<LaunchPlan>> {
+    let mut worker = SearchWorker::spawn(catalog.clone(), DEBOUNCE);
     let mut app = App::new(catalog, query);
     if !query.trim().is_empty() {
         let generation = worker.submit(query);
@@ -27,7 +33,7 @@ pub fn run(catalog: Arc<Catalog>, query: &str) -> anyhow::Result<Option<LaunchPl
     // Unlike ratatui::init, it reports failure (e.g. stdout isn't a TTY)
     // instead of panicking; main() maps the error to exit code 2.
     let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal, &mut app, &worker);
+    let result = event_loop(&mut terminal, &mut app, &mut worker, &mut rebuild);
     ratatui::restore();
     result
 }
@@ -35,7 +41,8 @@ pub fn run(catalog: Arc<Catalog>, query: &str) -> anyhow::Result<Option<LaunchPl
 fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    worker: &SearchWorker,
+    worker: &mut SearchWorker,
+    rebuild: &mut impl FnMut() -> anyhow::Result<Catalog>,
 ) -> anyhow::Result<Option<LaunchPlan>> {
     loop {
         while let Ok((generation, hits)) = worker.results.try_recv() {
@@ -65,6 +72,28 @@ fn event_loop(
                 }
                 None => app.status = Some(format!("{} not found on PATH", plan.argv[0])),
             },
+            Action::Refresh => {
+                // The rebuild blocks — a second or so when it has to ask Windows what is running
+                // — so say what is happening before the UI goes still.
+                app.status = Some("refreshing…".into());
+                terminal.draw(|frame| render::draw(frame, app, now_ms()))?;
+                match rebuild() {
+                    Ok(catalog) => {
+                        let catalog = Arc::new(catalog);
+                        app.replace_catalog(catalog.clone());
+                        // The old worker holds an Arc of the stale catalog; dropping it ends its
+                        // thread, and the new one searches what the user can now see.
+                        *worker = SearchWorker::spawn(catalog, DEBOUNCE);
+                        let query = app.query.clone();
+                        if !query.trim().is_empty() {
+                            let generation = worker.submit(&query);
+                            app.set_text_generation(generation);
+                        }
+                        app.status = None;
+                    }
+                    Err(err) => app.status = Some(format!("could not refresh: {err}")),
+                }
+            }
             Action::Focus { pid, source, title } => {
                 let env = app.catalog.sources[source].env.clone();
                 let result = match crate::process::PidDomain::of(&env) {

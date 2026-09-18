@@ -34,6 +34,8 @@ pub enum Action {
     Launch(LaunchPlan),
     Search(String),
     Copy(String),
+    /// Rebuild the catalog from disk, so sessions started or stopped since launch show up.
+    Refresh,
     /// Focus the terminal running this session: its pid, the source it was started from, and its
     /// title, which terminals show on the tab.
     Focus {
@@ -208,6 +210,29 @@ impl App {
             }
         }
         v
+    }
+
+    /// Swaps in a freshly built catalog. Selection follows the session's id rather than its row,
+    /// because a rebuild re-sorts the list — the row you were on is not the row you want. Every
+    /// cache keyed by session index is dropped, since those indices no longer mean anything.
+    pub fn replace_catalog(&mut self, catalog: Arc<Catalog>) {
+        let selected_id = self
+            .selected_session()
+            .map(|idx| self.catalog.sessions[idx].meta.id.clone());
+        self.catalog = catalog;
+        self.source_override.clear();
+        self.cwd_missing_cache.clear();
+        self.text_hits.clear();
+        self.preview = None;
+        self.preview_scroll = None;
+        self.recompute_rows(false);
+        if let Some(id) = selected_id
+            && let Some(row) = self.rows.iter().position(|r| {
+                matches!(r, Row::Session { idx, .. } if self.catalog.sessions[*idx].meta.id == id)
+            })
+        {
+            self.selected = row;
+        }
     }
 
     fn recompute_rows(&mut self, keep_selection: bool) {
@@ -477,7 +502,10 @@ impl App {
                 self.cycle_source();
                 Action::None
             }
-            (KeyCode::Char('r'), true) => {
+            // Ctrl-R is refresh, as it is in a browser and in ccpick's own web portal; the
+            // running-only filter lives on Ctrl-L for "live".
+            (KeyCode::Char('r'), true) => Action::Refresh,
+            (KeyCode::Char('l'), true) => {
                 self.running_only = !self.running_only;
                 self.recompute_rows(true);
                 Action::None
@@ -803,14 +831,43 @@ mod tests {
     }
 
     #[test]
-    fn running_only_and_sort_toggles() {
+    fn live_only_and_sort_toggles() {
         let mut a = app("");
-        a.handle_key(ctrl('r'));
+        a.handle_key(ctrl('l'));
         assert_eq!(session_ids(&a), vec!["c"]);
-        a.handle_key(ctrl('r'));
+        a.handle_key(ctrl('l'));
         a.handle_key(ctrl('s'));
         assert_eq!(a.sort, SortMode::Created);
         assert_eq!(session_ids(&a)[0], "d");
+    }
+
+    #[test]
+    fn ctrl_r_asks_for_a_refresh_rather_than_filtering() {
+        let mut a = app("");
+        assert_eq!(a.handle_key(ctrl('r')), Action::Refresh);
+        assert!(!a.running_only, "Ctrl-R must not touch the filter");
+        assert_eq!(
+            session_ids(&a).len(),
+            4,
+            "and must not change the rows itself"
+        );
+    }
+
+    #[test]
+    fn a_refreshed_catalog_keeps_the_selected_session_even_when_it_moves() {
+        let mut a = app("");
+        a.handle_key(key(KeyCode::Down));
+        let before = a.catalog.sessions[a.selected_session().unwrap()]
+            .meta
+            .id
+            .clone();
+        // A rebuild hands back an equivalent catalog; the selection must follow the session.
+        a.replace_catalog(Arc::new(fake_catalog()));
+        let after = a.catalog.sessions[a.selected_session().unwrap()]
+            .meta
+            .id
+            .clone();
+        assert_eq!(before, after);
     }
 
     #[test]

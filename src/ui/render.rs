@@ -11,7 +11,8 @@ use ratatui::widgets::{
     ScrollbarOrientation, ScrollbarState, Wrap,
 };
 
-const LIST_HELP: &str = " ↵ resume  → preview  ^A source  ^R running only  ^S sort  esc quit";
+const LIST_HELP: &str =
+    " ↵ resume  → preview  ^A source  ^L live only  ^S sort  ^R refresh  esc quit";
 const PREVIEW_HELP: &str = " ← sessions  ↑↓ line  PgUp/PgDn page  Home/End  ↵ resume  esc quit";
 
 pub fn highlight_spans(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {

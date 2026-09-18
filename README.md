@@ -55,7 +55,8 @@ conversation text appear below a divider shortly after.
 |---|---|
 | `Enter` | Resume, or focus the terminal of an already-running session (never resumes it twice) |
 | `Ctrl-A` | Cycle which source/account resumes the session |
-| `Ctrl-R` | Running sessions only |
+| `Ctrl-R` | Refresh: rescan for sessions started or stopped since you opened it |
+| `Ctrl-L` | Live sessions only |
 | `Ctrl-S` | Sort by last activity / created |
 | `→` / `←` | Focus the conversation preview / the session list (`Tab` toggles) |
 | `↑` / `↓` | Move selection (list) or scroll one line (preview) |

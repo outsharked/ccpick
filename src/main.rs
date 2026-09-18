@@ -106,7 +106,16 @@ fn run() -> Result<i32> {
         print!("{}", report::list_tsv(&catalog, &query));
         return Ok(0);
     }
-    match ui::run(std::sync::Arc::new(catalog), &query)? {
+    let rebuild = move || {
+        let catalog = catalog::build_from_settings(&settings, &mut cache);
+        if catalog.is_ok()
+            && let Err(err) = cache.save()
+        {
+            eprintln!("ccpick: warning: could not write cache: {err}");
+        }
+        catalog
+    };
+    match ui::run(std::sync::Arc::new(catalog), &query, rebuild)? {
         Some(plan) => launch_session(&plan),
         None => Ok(0),
     }

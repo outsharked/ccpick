@@ -127,9 +127,11 @@ same as Claude's. Renaming a thread in Codex without adding a new message to it 
 the title here until the next message arrives, or you run with `--no-cache`.
 
 Running Codex sessions are detected by walking this host's own `/proc`: a live `codex` process
-holds a file open that identifies its thread, so a match there means it's running. Which file
-that is depends on the Codex version — a lock under `thread-writer-locks/`, or the thread's
-rollout file on older builds — and ccpick accepts either. That works on Linux and inside
+holds a file open that identifies its thread, so a match there means it's running. Either of two
+files counts — a lock under `thread-writer-locks/`, or the thread's own rollout file — because
+which ones are open varies with the Codex version and with how far the session has got. A
+freshly started session that hasn't exchanged a message yet may show neither, and won't be
+listed at all until Codex writes it to the index. That works on Linux and inside
 WSL. It does not work on a Windows host, which has no `/proc` and no handle enumeration to stand
 in for it — on Windows, Codex sessions always resume rather than switching to a live terminal,
 even one that's actually running. Unlike Claude's pid-file records, this doesn't reach across

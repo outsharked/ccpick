@@ -1,6 +1,6 @@
 [package]
 name = "ccpick"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "Fast TUI to find and resume Claude Code sessions across config directories"
 repository = "https://github.com/outsharked/ccpick"

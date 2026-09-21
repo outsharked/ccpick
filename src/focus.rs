@@ -143,14 +143,18 @@ $hits[0].GetCurrentPattern(\
 [System.Windows.Automation.SelectionItemPattern]::Pattern).Select(); \
 return $window.Current.NativeWindowHandle }} }} \
 return 0 }}; \
-$id={start}; $hwnd=0; \
+$id={start}; $hwnd=0; $last=$null; \
 {attach}\
 {find_tab}\
 if ($hwnd -eq 0) {{ \
 for ($i = 0; $i -lt {MAX_HOPS} -and $id; $i++) {{ \
 $p = Get-Process -Id $id; \
+if ($p -and $id -ne $PID) {{ $last = $p.ProcessName }} \
 if ($p -and $p.MainWindowHandle -ne 0) {{ $hwnd = $p.MainWindowHandle; break }} \
 $id = (Get-CimInstance Win32_Process -Filter \"ProcessId=$id\").ParentProcessId }} }}; \
+if ($hwnd -eq 0 -and $last) {{ \
+$cands = @(Get-Process -Name $last | Where-Object {{ $_.MainWindowHandle -ne 0 }}); \
+if ($cands.Count -eq 1) {{ $hwnd = $cands[0].MainWindowHandle }} }}; \
 if ($hwnd -ne 0) {{ [CcPick.Win]::ShowWindow($hwnd, 9); [CcPick.Win]::SetForegroundWindow($hwnd) }}"
     )
 }
@@ -463,6 +467,30 @@ mod tests {
         assert!(
             script.contains("$hits.Count -eq 1"),
             "two candidate tabs must still select neither"
+        );
+    }
+
+    #[test]
+    fn a_broken_parent_chain_falls_back_to_a_sibling_window() {
+        // Climbing parents assumes an unbroken chain to a windowed process. VS Code does not
+        // provide one: the helper lands in a windowless Electron subprocess whose parent has
+        // already exited, so the walk dies with no handle and focusing silently does nothing.
+        // Observed on a real machine:
+        //   powershell -> wsl -> wsl -> Code (mainwnd=0) -> <gone>
+        // When that happens, look sideways for a window owned by a process of the same name.
+        let script = focus_script(Target::Inherited, "marker", Some("t"));
+        assert!(
+            script.contains("$id -ne $PID") && script.contains("$last = $p.ProcessName"),
+            "remember the deepest living ancestor's name, never the helper's own: a chain that \
+             dies at hop 0 would otherwise raise some unrelated PowerShell window"
+        );
+        assert!(
+            script.contains("Get-Process -Name $last"),
+            "the fallback must search by that name"
+        );
+        assert!(
+            script.contains("$cands.Count -eq 1"),
+            "more than one candidate window must select neither, as with tabs"
         );
     }
 

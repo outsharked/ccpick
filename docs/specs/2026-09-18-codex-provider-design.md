@@ -87,6 +87,11 @@ Naming a Codex directory outside the home requires an explicit `[[source]]` entr
 
 ## Liveness
 
+**Updated 2026-09-21:** Codex 0.155.0 holds no rollout file open. It holds
+`<config>/thread-writer-locks/<thread id>.lock` per live thread instead, and that file names the
+thread outright. ccpick matches either signal, so neither an upgrade nor a downgrade of Codex
+turns liveness off. The original reasoning follows.
+
 A running Codex process holds its rollout file open, and that filename carries the session
 UUID. So a live session is discoverable without any registry: find processes whose command
 line is `codex`, read their open file descriptors, and map the rollout paths back to ids.

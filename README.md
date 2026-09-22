@@ -220,7 +220,7 @@ Or from a clone, which is also how you get a binary to run in place:
 git clone https://github.com/outsharked/ccpick
 cd ccpick
 cargo build --release      # ./target/release/ccpick
-cargo install --path .     # or install it to ~/.cargo/bin
+cargo install --path . --root ~/.local   # or install it to ~/.local/bin
 ```
 
 ## Development
@@ -235,7 +235,7 @@ mise test                     # tests only
 mise test-windows             # WSL only: run the test suite as Windows binaries via interop
 mise lint-windows             # WSL only: clippy for the Windows target
 mise format                   # format
-mise install-bin              # install the release binary to ~/.cargo/bin
+mise install-bin              # install the release binary to ~/.local/bin
 ```
 
 Run the TUI from a plain shell rather than inside a Claude Code session, since resuming

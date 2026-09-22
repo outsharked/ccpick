@@ -31,8 +31,8 @@ description = "Release build"
 run = "cargo build --release"
 
 [tasks.install-bin]
-description = "Install the release binary to ~/.cargo/bin"
-run = "cargo install --path ."
+description = "Install the release binary to ~/.local/bin"
+run = "cargo install --path . --root ~/.local"
 
 [tasks.test-windows]
 description = "WSL only: build tests for Windows (mingw) and run them via interop"

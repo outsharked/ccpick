@@ -18,7 +18,7 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
 | `mise lint-windows` | Clippy for the Windows target |
 | `mise format` | `cargo fmt` |
 | `mise build` | Release build |
-| `mise install-bin` | Install the release binary to `~/.cargo/bin` |
+| `mise install-bin` | Install the release binary to `~/.local/bin` |
 | `mise release <version>` | Bump version, run checks, commit and tag (does not push) |
 
 - **Run `mise check` before every commit.** It must pass: no fmt diff, no clippy warnings, all

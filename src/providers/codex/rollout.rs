@@ -1,8 +1,11 @@
 //! A Codex rollout file: one JSON object per line.
 //!
 //! `response_item / message` is the raw model conversation and carries injected context — the
-//! environment block, AGENTS.md — so it reads as noise. `event_msg / user_message` and
-//! `agent_message` are what the person typed and what Codex showed them. Only those are read.
+//! environment block, AGENTS.md — so it reads as noise. What the person typed and what Codex
+//! showed them is carried by `event_msg` lines, in one of two shapes depending on the Codex
+//! version that wrote the file (never both in the files seen so far): older versions write
+//! `user_message` / `agent_message`, newer ones write `item_completed` with a `UserMessage` /
+//! `AgentMessage` item. Only those are read.
 use crate::model::{Message, Role};
 use serde::Deserialize;
 use std::path::Path;
@@ -19,6 +22,35 @@ struct Payload {
     #[serde(rename = "type")]
     kind: Option<String>,
     message: Option<String>,
+    item: Option<Item>,
+}
+
+/// The `item` of an `item_completed` event. Its `type` is PascalCase (`UserMessage`,
+/// `Reasoning`, `CommandExecution`, ...) and the content parts' own `type` casing differs between
+/// user and agent items, so parts are read by whether they carry `text`, not by their type.
+#[derive(Deserialize)]
+struct Item {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    content: Vec<Part>,
+}
+
+#[derive(Deserialize)]
+struct Part {
+    text: Option<String>,
+}
+
+impl Item {
+    fn text(self) -> Option<String> {
+        let text = self
+            .content
+            .into_iter()
+            .filter_map(|p| p.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 /// The conversational message carried by a line, if any.
@@ -27,14 +59,23 @@ fn conversational(line: Line) -> Option<Message> {
         return None;
     }
     let payload = line.payload?;
-    let role = match payload.kind.as_deref()? {
-        "user_message" => Role::User,
-        "agent_message" => Role::Assistant,
+    let (role, text) = match payload.kind.as_deref()? {
+        "user_message" => (Role::User, payload.message?),
+        "agent_message" => (Role::Assistant, payload.message?),
+        "item_completed" => {
+            let item = payload.item?;
+            let role = match item.kind.as_str() {
+                "UserMessage" => Role::User,
+                "AgentMessage" => Role::Assistant,
+                _ => return None,
+            };
+            (role, item.text()?)
+        }
         _ => return None,
     };
     Some(Message {
         role,
-        text: payload.message?,
+        text,
         ts: None,
     })
 }
@@ -104,6 +145,24 @@ mod tests {
                 .any(|m| m.text.contains("noise that must not appear")),
             "injected environment context must never reach the preview"
         );
+    }
+
+    #[test]
+    fn item_completed_events_are_read_like_the_older_message_events() {
+        // Newer Codex writes the conversation as `item_completed` events (`UserMessage` /
+        // `AgentMessage` items) and no longer emits `user_message` / `agent_message` at all.
+        let msgs = messages(
+            &crate::testutil::manifest_dir().join("tests/fixtures/codex/item_completed.jsonl"),
+        );
+        assert_eq!(
+            msgs.len(),
+            2,
+            "reasoning, commands and injected context are not conversation"
+        );
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[0].text, "fix the PINEAPPLE parser");
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert!(msgs[1].text.starts_with("Found it"));
     }
 
     #[test]

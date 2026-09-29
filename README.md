@@ -67,7 +67,7 @@ ccpick export --head-chars 0 --tail-chars 0    # metadata only
 The output is one JSON array with a session per line, most recently active first:
 
 ```json
-{"agent":"claude","id":"…","title":"Fix docker build cache","project":"~/code/app","branch":"main","started":"2026-09-28T09:12:03Z","last_active":"2026-09-28T10:40:51Z","messages":42,"opening_prompt":"…","tail":"assistant: …","truncated":true}
+{"agent":"claude","id":"…","title":"Fix docker build cache","project":"~/code/app","branch":"main","started":"2026-09-28T09:12:03Z","last_active":"2026-09-28T10:40:51Z","messages":42,"source":"c1","resume_command":"cd ~/code/app && ccs c1 --resume …","opening_prompt":"…","tail":"assistant: …","truncated":true}
 ```
 
 `--since` takes an age (`36h`, `14d`, `2w`) or a date (`2026-09-01`) and defaults to `14d`;

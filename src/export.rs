@@ -31,6 +31,10 @@ struct Record {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_active: Option<String>,
     messages: u32,
+    /// Config directory the session lives in.
+    source: String,
+    /// Paste-ready command that resumes the session (cd, config dir and agent invocation).
+    resume_command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     opening_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +164,11 @@ pub fn export_json(catalog: &Catalog, query: &str, opts: ExportOptions) -> Strin
                 started: iso(s.meta.first_ts),
                 last_active: iso(s.meta.last_ts),
                 messages: s.meta.msg_count,
+                source: source.name.clone(),
+                resume_command: crate::shell::resume_command(
+                    &catalog.launch_plan(i, s.default_source),
+                    &source.env,
+                ),
                 opening_prompt,
                 tail,
                 truncated,
@@ -295,6 +304,8 @@ mod tests {
         assert_eq!(recs[0]["opening_prompt"], "fix docker");
         assert_eq!(recs[0]["tail"], "assistant: done");
         assert_eq!(recs[0]["truncated"], false);
+        assert_eq!(recs[0]["source"], "one");
+        assert!(recs[0]["resume_command"].as_str().unwrap().contains("a"));
     }
 
     #[test]

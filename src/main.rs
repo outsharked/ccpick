@@ -35,8 +35,9 @@ enum Command {
     /// Print recent sessions as JSON, for an LLM to summarise
     ///
     /// One JSON array, one session per line, most recently active first. Each session has its
-    /// title, project, branch, timestamps and message count, plus `opening_prompt` (the first
-    /// user message) and `tail` (the end of the conversation, role-labelled), each capped.
+    /// title, project, branch, timestamps and message count, plus `source`, a paste-ready
+    /// `resume_command`, `opening_prompt` (the first user message) and `tail` (the end of the
+    /// conversation, role-labelled), each capped.
     Export {
         /// Only sessions matching this query
         query: Vec<String>,

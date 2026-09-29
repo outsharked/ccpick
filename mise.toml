@@ -3,7 +3,7 @@
 rust = "stable"
 
 [tasks.dev]
-description = "Run ccpick from source (args pass through: mise dev -- --list docker)"
+description = "Run ccpick from source (args pass through: mise dev -- list docker)"
 run = "cargo run --"
 
 [tasks.test]

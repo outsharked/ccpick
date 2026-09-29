@@ -1,9 +1,8 @@
-//! Plain-text output for --sources and --list.
+//! Plain-text output for the `sources` and `list` commands.
 use crate::catalog::Catalog;
 use crate::format::local_time;
 use crate::model::LaunchSpec;
 use crate::search;
-use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::Path;
 
@@ -54,16 +53,7 @@ pub fn sources_report(catalog: &Catalog) -> String {
 
 /// last activity, source, running pid or "-", id, cwd, title.
 pub fn list_tsv(catalog: &Catalog, query: &str) -> String {
-    let all: Vec<usize> = (0..catalog.sessions.len()).collect();
-    let mut order = search::fuzzy(catalog, &all, query);
-    let mut seen: HashSet<usize> = order.iter().copied().collect();
-    if !query.trim().is_empty() {
-        for hit in search::full_text(catalog, &all, query, None).unwrap_or_default() {
-            if seen.insert(hit.session) {
-                order.push(hit.session);
-            }
-        }
-    }
+    let order = search::matching(catalog, query);
     let mut out = String::new();
     for i in order {
         let s = &catalog.sessions[i];

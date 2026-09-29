@@ -43,7 +43,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Every branch is truncated, which is where this differs from Claude: Codex's `title` column
 /// frequently holds the entire first prompt rather than a short generated label, so it arrives
 /// multi-line and sometimes kilobytes long. A title is a single short line everywhere it is
-/// used — one record per line in `--list`, one row in the TUI, a window title to match when
+/// used — one record per line in `list`, one row in the TUI, a window title to match when
 /// focusing — so it is cut here, at the one place all three branches pass through.
 fn title_for(thread: &db::Thread) -> String {
     if let Some(name) = thread.name.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -263,7 +263,7 @@ mod tests {
     fn every_title_source_is_cut_to_one_short_line() {
         // Codex's `title` column is not a short generated label the way Claude's is: it is very
         // often the whole first prompt, multi-line and kilobytes long. Untruncated it breaks the
-        // one-record-per-line `--list` format, overflows a TUI row, and is handed to the focus
+        // one-record-per-line `list` format, overflows a TUI row, and is handed to the focus
         // code as a window title it could never match.
         let long = format!("{}\nsecond line", "x".repeat(200));
         let from_title = title_for(&thread("", &long, ""));

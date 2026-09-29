@@ -136,6 +136,22 @@ pub fn full_text(
     Some(hits)
 }
 
+/// Session indices matching `query`, fuzzy matches first (best first), then sessions whose
+/// conversation text contains it. An empty query matches everything in catalog order.
+pub fn matching(catalog: &Catalog, query: &str) -> Vec<usize> {
+    let all: Vec<usize> = (0..catalog.sessions.len()).collect();
+    let mut order = fuzzy(catalog, &all, query);
+    if !query.trim().is_empty() {
+        let mut seen: std::collections::HashSet<usize> = order.iter().copied().collect();
+        for hit in full_text(catalog, &all, query, None).unwrap_or_default() {
+            if seen.insert(hit.session) {
+                order.push(hit.session);
+            }
+        }
+    }
+    order
+}
+
 pub struct SearchWorker {
     tx: mpsc::Sender<(u64, String)>,
     pub results: mpsc::Receiver<(u64, Vec<TextHit>)>,

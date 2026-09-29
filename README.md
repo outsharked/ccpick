@@ -44,10 +44,35 @@ On macOS, sessions are listed and resumable but never shown as running.
 ```bash
 ccpick                 # browse everything
 ccpick docker cache    # start with a query
-ccpick --list migration  # non-interactive TSV
-ccpick --sources       # show discovered sources and stores
+ccpick list migration  # non-interactive TSV
+ccpick sources         # show discovered sources and stores
+ccpick export          # recent sessions as JSON (see below)
 ccpick --config-dir ~/.claude-work
 ```
+
+### Export for an LLM
+
+`ccpick export` prints your recent sessions as JSON, so you can hand them to an LLM and ask
+what you've been working on. Whole transcripts would be far too large, so each session is
+a short summary: its title, project, branch, timestamps and message count, plus the opening
+prompt (the goal) and the tail of the conversation (where it ended up), each capped.
+
+```bash
+ccpick export > recent.json                    # last 14 days
+ccpick export --since 2026-09-01 --tail-chars 1500
+ccpick export --since 36h docker               # only sessions matching "docker"
+ccpick export --head-chars 0 --tail-chars 0    # metadata only
+```
+
+The output is one JSON array with a session per line, most recently active first:
+
+```json
+{"agent":"claude","id":"…","title":"Fix docker build cache","project":"~/code/app","branch":"main","started":"2026-09-28T09:12:03Z","last_active":"2026-09-28T10:40:51Z","messages":42,"opening_prompt":"…","tail":"assistant: …","truncated":true}
+```
+
+`--since` takes an age (`36h`, `14d`, `2w`) or a date (`2026-09-01`) and defaults to `14d`;
+`--head-chars` and `--tail-chars` default to 300 and 700, and `0` omits that field.
+`truncated` is true when either was cut. Warnings go to stderr, so stdout is always JSON.
 
 Type to filter titles, project paths, branches and first prompts instantly; matches inside
 conversation text appear below a divider shortly after.
@@ -93,8 +118,9 @@ else, no accounts, and nothing persisted beyond ccpick's own metadata cache.
 `cargo build --no-default-features` builds the TUI with no HTTP dependency at all, and
 that build has no `web` subcommand.
 
-Since `web` is a subcommand rather than a flag, searching for the literal word "web"
-needs `ccpick --list -- web` — plain `ccpick --list web` starts the portal instead.
+Since `web` is a subcommand, searching for the literal word "web" needs `ccpick -- web`
+(or `ccpick list -- web` for TSV) — plain `ccpick web` starts the portal instead. The same
+goes for the other command names: `list`, `export` and `sources`.
 
 Filter the list with the chips under the search box: live sessions only, and — when a
 machine has sessions in more than one environment — by Windows, WSL or Linux. `Ctrl-L` toggles
@@ -229,7 +255,7 @@ Tasks are managed with [mise](https://mise.jdx.dev) (`mise tasks` lists them):
 
 ```bash
 mise dev                      # run the TUI from source
-mise dev -- --list docker     # args after -- pass through to ccpick
+mise dev -- list docker       # args after -- pass through to ccpick
 mise check                    # fmt check, clippy (warnings as errors), tests
 mise test                     # tests only
 mise test-windows             # WSL only: run the test suite as Windows binaries via interop

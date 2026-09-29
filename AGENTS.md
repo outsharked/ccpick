@@ -41,18 +41,18 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
 
 ## Running the binary as an agent
 
-- Never run the TUI (`ccpick` or `mise dev` without `--list`/`--sources`) from an agent or any
+- Never run the TUI (`ccpick` or `mise dev` without a `list`/`sources`/`export` command) from an agent or any
   non-interactive shell: it takes over the terminal, and Enter `exec`s a real Claude session.
-- For smoke tests use `mise dev -- --sources` and `mise dev -- --list <query>`. Both read the
-  real session data; neither writes anything except ccpick's own cache.
+- For smoke tests use `mise dev -- sources`, `mise dev -- list <query>` and `mise dev -- export`. All read the
+  real session data; none writes anything except ccpick's own cache.
 - Never modify anything under `~/.ccs` or `~/.claude`.
 - Never leave a portal (`ccpick web`) running after a task: it's a live process that keeps scanning
   real session data and holds a listening socket open indefinitely (only Ctrl-C or being killed
   ends it — nothing else does). Smoke-test it with `mise dev -- web --no-open` and `curl` (the
   token is in the printed URL), then stop the process yourself. Watch for it dispatching by
   accident: `web` is a subcommand, so it can win over the query positional it looks like
-  (`ccpick --list web` starts the portal rather than listing sessions matching "web" — see the
-  README's "Web portal" section).
+  (`ccpick web` starts the portal rather than searching for "web", and likewise for `list`,
+  `export` and `sources`; `ccpick -- web` searches — see the README's "Web portal" section).
 
 ## Architecture rules
 
@@ -105,7 +105,7 @@ Use mise tasks, not ad-hoc cargo commands (`mise tasks` lists them):
 - Claude transcript parsing is tested against small synthetic files in `tests/fixtures/claude/`.
 - UI state is tested terminal-free via `App::handle_key`; rendering via ratatui's `TestBackend`.
 - Performance targets on ~300 transcripts / ~300 MB: warm start < 100 ms, cold start < 1 s,
-  full-text search < 500 ms. Re-measure (`time mise dev -- --list <word>`) after touching
+  full-text search < 500 ms. Re-measure (`time mise dev -- list <word>`) after touching
   scanning or search.
 
 ## The README screenshot

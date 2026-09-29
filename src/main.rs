@@ -51,6 +51,20 @@ enum Command {
         #[arg(long, default_value_t = 700, value_name = "N")]
         tail_chars: usize,
     },
+    /// Print one session's full conversation, by id (or unique id prefix)
+    ///
+    /// Conversation text only (no tool payloads), as a readable transcript or, with
+    /// `--format json`, one JSON object. Find ids with `ccpick export` or `ccpick list`.
+    Show {
+        /// Session id or unique prefix
+        id: String,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = ShowFormat::Text)]
+        format: ShowFormat,
+        /// Cap each message at N chars (0 = no cap)
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        max_chars: usize,
+    },
     /// Serve the session list as a local web page
     #[cfg(feature = "web")]
     Web {
@@ -64,6 +78,12 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ShowFormat {
+    Text,
+    Json,
 }
 
 fn main() {
@@ -138,6 +158,21 @@ fn run() -> Result<i32> {
                 tail_chars: *tail_chars,
             };
             print!("{}", export::export_json(&catalog, &query.join(" "), opts));
+            return Ok(0);
+        }
+        Some(Command::Show {
+            id,
+            format,
+            max_chars,
+        }) => {
+            let json = matches!(format, ShowFormat::Json);
+            match export::show_session(&catalog, id, json, *max_chars) {
+                Ok(out) => print!("{out}"),
+                Err(err) => {
+                    eprintln!("ccpick: {err}");
+                    return Ok(1);
+                }
+            }
             return Ok(0);
         }
         _ => {}

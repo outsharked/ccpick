@@ -70,6 +70,14 @@ The output is one JSON array with a session per line, most recently active first
 {"agent":"claude","id":"…","title":"Fix docker build cache","project":"~/code/app","branch":"main","started":"2026-09-28T09:12:03Z","last_active":"2026-09-28T10:40:51Z","messages":42,"source":"c1","resume_command":"cd ~/code/app && ccs c1 --resume …","opening_prompt":"…","tail":"assistant: …","truncated":true}
 ```
 
+To read one session in full, pass its `id` (or a unique prefix) to `show`:
+
+```bash
+ccpick show 877a7dd3                        # readable transcript, conversation text only
+ccpick show 877a7dd3 --format json          # one JSON object with a `conversation` array
+ccpick show 877a7dd3 --max-chars 500        # cap each message
+```
+
 `--since` takes an age (`36h`, `14d`, `2w`) or a date (`2026-09-01`) and defaults to `14d`;
 `--head-chars` and `--tail-chars` default to 300 and 700, and `0` omits that field.
 `truncated` is true when either was cut. Warnings go to stderr, so stdout is always JSON.

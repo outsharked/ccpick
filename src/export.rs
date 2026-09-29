@@ -183,6 +183,93 @@ pub fn export_json(catalog: &Catalog, query: &str, opts: ExportOptions) -> Strin
     }
 }
 
+/// A single session's full conversation, found by exact id or unique id prefix.
+///
+/// `json` gives one object (the export record fields plus a `conversation` array); otherwise a
+/// readable transcript. `max_chars` caps each message's text (0 = uncut).
+pub fn show_session(
+    catalog: &Catalog,
+    id: &str,
+    json: bool,
+    max_chars: usize,
+) -> Result<String, String> {
+    let hits: Vec<usize> = (0..catalog.sessions.len())
+        .filter(|&i| catalog.sessions[i].meta.id.starts_with(id))
+        .collect();
+    let exact = hits
+        .iter()
+        .copied()
+        .find(|&i| catalog.sessions[i].meta.id == id);
+    let i = match (exact, hits.as_slice()) {
+        (Some(i), _) | (None, &[i]) => i,
+        (None, []) => return Err(format!("no session with id {id:?}")),
+        (None, many) => {
+            let ids: Vec<&str> = many
+                .iter()
+                .map(|&i| catalog.sessions[i].meta.id.as_str())
+                .collect();
+            return Err(format!("id {id:?} is ambiguous: {}", ids.join(", ")));
+        }
+    };
+    let s = &catalog.sessions[i];
+    let source = &catalog.sources[s.default_source];
+    let project = s
+        .meta
+        .cwd
+        .as_ref()
+        .map(|p| shorten_home_in(p, &source.env_home, &source.env));
+    let resume_command =
+        crate::shell::resume_command(&catalog.launch_plan(i, s.default_source), &source.env);
+    let cap = |text: &str| {
+        if max_chars == 0 {
+            text.to_string()
+        } else {
+            head(text, max_chars).0
+        }
+    };
+    let messages = catalog.messages(i);
+    let role = |m: &Message| match m.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    };
+    if json {
+        let conversation: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": role(m), "time": iso(m.ts), "text": cap(&m.text)}))
+            .collect();
+        let value = serde_json::json!({
+            "agent": s.meta.agent,
+            "id": s.meta.id,
+            "title": s.meta.title,
+            "project": project,
+            "branch": s.meta.branch,
+            "started": iso(s.meta.first_ts),
+            "last_active": iso(s.meta.last_ts),
+            "source": source.name,
+            "resume_command": resume_command,
+            "conversation": conversation,
+        });
+        return Ok(format!("{value:#}\n"));
+    }
+    let mut out = format!("# {}\n", s.meta.title);
+    out += &format!("id: {}\n", s.meta.id);
+    if let Some(p) = &project {
+        out += &format!("project: {p}\n");
+    }
+    if let Some(b) = &s.meta.branch {
+        out += &format!("branch: {b}\n");
+    }
+    if let (Some(a), Some(b)) = (iso(s.meta.first_ts), iso(s.meta.last_ts)) {
+        out += &format!("active: {a} → {b}\n");
+    }
+    out += &format!("resume: {resume_command}\n");
+    for m in &messages {
+        let when = iso(m.ts).map(|t| format!(" [{t}]")).unwrap_or_default();
+        out += &format!("\n## {}{when}\n{}\n", role(m), cap(&m.text));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +425,37 @@ mod tests {
         assert_eq!(recs[0]["last_active"], "1970-01-02T00:00:00Z");
         assert_eq!(recs[0]["project"], "~/proj");
         assert!(recs[0].get("branch").is_none());
+    }
+
+    #[test]
+    fn show_prints_the_whole_conversation_by_id_prefix() {
+        let out = show_session(&fake_catalog(), "a", false, 0).unwrap();
+        assert!(out.starts_with("# Docker build cache\n"));
+        assert!(out.contains("\n## user"));
+        assert!(out.contains("fix docker"));
+        assert!(out.contains("\n## assistant"));
+        assert!(out.contains("done"));
+    }
+
+    #[test]
+    fn show_json_has_a_conversation_array() {
+        let out = show_session(&fake_catalog(), "a", true, 0).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["id"], "a");
+        assert_eq!(v["conversation"][0]["role"], "user");
+        assert_eq!(v["conversation"][1]["text"], "done");
+    }
+
+    #[test]
+    fn show_caps_each_message() {
+        let out = show_session(&fake_catalog(), "a", false, 3).unwrap();
+        assert!(out.contains("fix…"));
+        assert!(out.contains("don…"));
+    }
+
+    #[test]
+    fn show_rejects_unknown_ids() {
+        assert!(show_session(&fake_catalog(), "zzz", false, 0).is_err());
     }
 
     #[test]

@@ -91,6 +91,11 @@ pub struct App {
     pub dialog: Option<ResumeDialog>,
     /// Esc asks before quitting, so a stray Esc while typing doesn't drop the session list.
     pub confirm_quit: bool,
+    /// A running session the user pressed Enter on twice in a row: asks whether to resume it here
+    /// anyway (the process may be a stale record, and Claude allows a second resume).
+    pub resume_prompt: Option<usize>,
+    /// The session the previous key was an Enter on; any other key clears it.
+    last_enter: Option<usize>,
     source_override: HashMap<usize, usize>,
     text_hits: Vec<TextHit>,
     text_generation: u64,
@@ -116,6 +121,8 @@ impl App {
             status: None,
             dialog: None,
             confirm_quit: false,
+            resume_prompt: None,
+            last_enter: None,
             source_override: HashMap::new(),
             text_hits: Vec::new(),
             text_generation: 0,
@@ -426,7 +433,12 @@ impl App {
         };
         let session = &self.catalog.sessions[idx];
         if let Some((pid, source)) = session.live {
-            // A running session can't be resumed a second time; focus its terminal instead.
+            if self.last_enter == Some(idx) {
+                // Enter twice: focusing didn't do what the user wanted, so offer to resume it here.
+                self.resume_prompt = Some(idx);
+                return Action::None;
+            }
+            self.last_enter = Some(idx);
             self.status = Some(format!(
                 "running in {} (pid {pid})",
                 self.catalog.sources[source].name
@@ -437,6 +449,11 @@ impl App {
                 Err(_) => Action::None,
             };
         }
+        self.launch(idx)
+    }
+
+    /// Resume `idx` in this terminal (or show the dialog for a source that can't launch).
+    fn launch(&mut self, idx: usize) -> Action {
         let source = self.launch_source(idx);
         if !self.catalog.is_launchable(source) {
             self.open_dialog(idx);
@@ -457,6 +474,20 @@ impl App {
         }
     }
 
+    /// While the resume prompt is up, only "yes" resumes; every other key dismisses it.
+    fn handle_resume_prompt_key(&mut self, key: KeyEvent, idx: usize) -> Action {
+        self.resume_prompt = None;
+        self.last_enter = None;
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter
+                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.launch(idx)
+            }
+            _ => Action::None,
+        }
+    }
+
     /// While the quit prompt is up, only "yes" quits; Ctrl-C still quits outright and every
     /// other key dismisses the prompt without acting, so a typo can't resume the wrong session.
     fn handle_confirm_quit_key(&mut self, key: KeyEvent) -> Action {
@@ -472,6 +503,12 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if let Some(idx) = self.resume_prompt {
+            return self.handle_resume_prompt_key(key, idx);
+        }
+        if key.code != KeyCode::Enter {
+            self.last_enter = None;
+        }
         if self.confirm_quit {
             return self.handle_confirm_quit_key(key);
         }
@@ -570,6 +607,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::catalog::fake_catalog;
+    use crate::providers::fake::FakeProvider;
 
     fn app(query: &str) -> App {
         App::new(Arc::new(fake_catalog()), query)
@@ -666,15 +704,118 @@ mod tests {
     }
 
     #[test]
-    fn running_session_is_never_resumed() {
+    fn first_enter_on_a_running_session_does_not_resume_it() {
         let mut a = app("");
         a.selected = 2;
-        // Focusing is fine; resuming a second copy of a live session is not.
         assert!(!matches!(
             a.handle_key(key(KeyCode::Enter)),
             Action::Launch(_)
         ));
         assert_eq!(a.status.as_deref(), Some("running in two (pid 4242)"));
+        assert_eq!(a.resume_prompt, None);
+    }
+
+    #[test]
+    fn second_enter_on_a_running_session_asks_to_resume_it_here() {
+        let mut a = app("");
+        a.selected = 2;
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
+        assert_eq!(a.resume_prompt, Some(2));
+    }
+
+    #[test]
+    fn confirming_the_resume_prompt_launches_the_session() {
+        let mut a = app("");
+        a.selected = 2;
+        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Char('y'))),
+            Action::Launch(_)
+        ));
+        assert_eq!(a.resume_prompt, None);
+
+        let mut a = app("");
+        a.selected = 2;
+        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Launch(_)
+        ));
+    }
+
+    #[test]
+    fn any_other_key_cancels_the_resume_prompt_without_acting() {
+        let mut a = app("");
+        a.selected = 2;
+        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.handle_key(key(KeyCode::Char('n'))), Action::None);
+        assert_eq!(a.resume_prompt, None);
+        assert_eq!(
+            a.query, "",
+            "the cancelling key is not typed into the query"
+        );
+        // A cancelled prompt starts over: the next Enter focuses again.
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Focus { .. }
+        ));
+    }
+
+    #[test]
+    fn enters_with_another_key_between_do_not_prompt() {
+        let mut a = app("");
+        a.selected = 2;
+        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Down));
+        a.handle_key(key(KeyCode::Up));
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Focus { .. }
+        ));
+        assert_eq!(a.resume_prompt, None);
+    }
+
+    #[test]
+    fn enter_after_moving_to_another_running_session_focuses_it() {
+        let mut a = app("");
+        a.selected = 2;
+        a.handle_key(key(KeyCode::Enter));
+        a.selected = 0; // not running
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Launch(_)
+        ));
+    }
+
+    #[test]
+    fn resume_here_still_refuses_a_session_whose_project_dir_is_gone() {
+        let mut p = FakeProvider::default();
+        p.add_source("one", "/s");
+        p.add_session("/s", "x", "Gone", 1, 1, &[]);
+        p.set_cwd("/s", "x", Some("/nonexistent/ccpick-test"));
+        p.records.insert(
+            "one".into(),
+            vec![crate::model::LaunchRecord {
+                pid: 9,
+                session_id: "x".into(),
+                started_at_ms: 1,
+                alive: true,
+            }],
+        );
+        let mut a = App::new(Arc::new(crate::catalog::build_fake(p)), "");
+        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.handle_key(key(KeyCode::Char('y'))), Action::None);
+        assert!(
+            a.status
+                .as_deref()
+                .unwrap()
+                .starts_with("project dir no longer exists")
+        );
     }
 
     #[test]

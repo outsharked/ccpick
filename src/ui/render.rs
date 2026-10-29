@@ -86,9 +86,34 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64) {
     if app.dialog.is_some() {
         draw_dialog(frame, app);
     }
+    if let Some(idx) = app.resume_prompt {
+        draw_resume_confirm(frame, app, idx);
+    }
     if app.confirm_quit {
         draw_quit_confirm(frame);
     }
+}
+
+fn draw_resume_confirm(frame: &mut Frame, app: &App, idx: usize) {
+    let session = &app.catalog.sessions[idx];
+    let running = match session.live {
+        Some((pid, source)) => format!(
+            "Running in {} (pid {pid}).",
+            app.catalog.sources[source].name
+        ),
+        None => "Marked as running.".into(),
+    };
+    draw_modal(
+        frame,
+        " Resume here ",
+        vec![
+            Line::from(running),
+            Line::from("Resume it here anyway?"),
+            Line::from(""),
+            Line::from(" y / ↵ resume here   any other key cancel").dim(),
+        ],
+        50,
+    );
 }
 
 fn draw_quit_confirm(frame: &mut Frame) {
@@ -799,6 +824,21 @@ mod tests {
         let text = dump(&buffer);
         assert!(text.contains("Quit ccpick?"));
         assert!(text.contains("y / ↵ quit"));
+    }
+
+    #[test]
+    fn renders_the_resume_here_prompt() {
+        let mut app = App::new(Arc::new(fake_catalog()), "");
+        app.selected = 2; // "Running thing", pid 4242 via "two"
+        app.handle_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Enter,
+        ));
+        app.handle_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Enter,
+        ));
+        let text = dump(&draw_to(&mut app, 100, 30));
+        assert!(text.contains("pid 4242"));
+        assert!(text.contains("Resume it here anyway?"));
     }
 
     #[test]

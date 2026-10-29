@@ -87,7 +87,7 @@ conversation text appear below a divider shortly after.
 
 | Key | Action |
 |---|---|
-| `Enter` | Resume, or focus the terminal of an already-running session (never resumes it twice) |
+| `Enter` | Resume, or focus the terminal of an already-running session. `Enter` again on a running session offers to resume it here anyway, for when the "running" state is stale |
 | `Ctrl-A` | Cycle which source/account resumes the session |
 | `Ctrl-R` | Refresh: rescan for sessions started or stopped since you opened it |
 | `Ctrl-L` | Live sessions only |
@@ -196,6 +196,9 @@ the other side (`c` copies it), since ccpick doesn't launch across the boundary.
 Pressing Enter on a session that is *running* brings its terminal to the front instead of
 resuming it, switching to the right tab where the terminal supports tabs (Windows Terminal does).
 It takes a second or two, since the work runs through PowerShell.
+
+If the session isn't really running (a stale record), press Enter again: ccpick asks whether to
+resume it here anyway. Nothing is killed.
 
 - **Windows sessions** are found through their console: ccpick briefly sets the console title to
   a unique marker, selects the tab showing it, then restores the previous title.

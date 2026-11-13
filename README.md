@@ -209,6 +209,11 @@ resume it here anyway. Nothing is killed.
 - If no terminal can be found, the status line reports that the session is running, with the
   reason.
 
+On Linux, this works for sessions running in GNOME Terminal, including under Wayland: ccpick
+reads the tab's id from the session's environment and asks GNOME Terminal to bring that tab to
+the front, the same way picking a terminal from the desktop search does. Other Linux terminals
+don't offer a way to do this, so for them the status line reports the session as running.
+
 ```toml
 [environments]
 auto = true                # set false to only scan the native environment

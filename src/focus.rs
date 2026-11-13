@@ -7,6 +7,12 @@
 //! itself to the first ancestor with a window. (Walking `/proc` for `NtTgid` only works when the
 //! shell descends from a Windows interop launch, which isn't the case with systemd enabled, so
 //! it is kept only as a fallback.) On Windows the ancestor chain is walked directly.
+//!
+//! On Linux, GNOME Terminal is supported: it puts the tab's identity in the environment of every
+//! process it starts (`GNOME_TERMINAL_SCREEN`), and its GNOME Shell search provider raises a tab
+//! by that id, the same way picking a terminal from the desktop search does. Wayland doesn't let
+//! one program raise another's window, so going through the terminal itself is what makes this
+//! work there. Other Linux terminals expose nothing comparable.
 use crate::env::{Env, HostContext};
 use crate::process::PidDomain;
 use std::process::{Command, Stdio};
@@ -50,12 +56,61 @@ pub fn windows_host_pid(pid: u32, read_status: impl Fn(u32) -> Option<String>) -
 /// The session's interop socket path from its `/proc/<pid>/environ`, used to launch a Windows
 /// process attached to that session's terminal.
 pub fn parse_interop_socket(environ: &[u8]) -> Option<String> {
+    environ_var(environ, "WSL_INTEROP").map(str::to_string)
+}
+
+/// A non-empty variable from the contents of a `/proc/<pid>/environ` file.
+fn environ_var<'a>(environ: &'a [u8], name: &str) -> Option<&'a str> {
     environ
         .split(|b| *b == 0)
         .filter_map(|entry| std::str::from_utf8(entry).ok())
-        .find_map(|entry| entry.strip_prefix("WSL_INTEROP="))
+        .find_map(|entry| entry.strip_prefix(name)?.strip_prefix('='))
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+}
+
+/// The GNOME Terminal tab a process runs in.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GnomeTerminalTab {
+    /// Bus name of the terminal server that owns the tab (`GNOME_TERMINAL_SERVICE`), when set.
+    pub service: Option<String>,
+    /// The tab's id as GNOME Terminal's search provider knows it.
+    pub id: String,
+}
+
+const GNOME_TERMINAL_SCREEN_PREFIX: &str = "/org/gnome/Terminal/screen/";
+
+/// The session's GNOME Terminal tab from its `/proc/<pid>/environ`. The tab's D-Bus object path
+/// ends in its UUID with `_` for `-` (D-Bus paths can't hold dashes); the search provider uses
+/// the plain UUID.
+pub fn parse_gnome_terminal_tab(environ: &[u8]) -> Option<GnomeTerminalTab> {
+    let uuid = environ_var(environ, "GNOME_TERMINAL_SCREEN")?
+        .strip_prefix(GNOME_TERMINAL_SCREEN_PREFIX)
+        .filter(|uuid| !uuid.is_empty() && !uuid.contains('/'))?;
+    Some(GnomeTerminalTab {
+        service: environ_var(environ, "GNOME_TERMINAL_SERVICE").map(str::to_string),
+        id: uuid.replace('_', "-"),
+    })
+}
+
+/// `gdbus` arguments that bring `tab` to the front: the call GNOME Shell makes when a terminal
+/// is picked from the desktop search. The timestamp is left at 0 (no user-event time to hand on).
+pub fn gnome_terminal_focus_args(tab: &GnomeTerminalTab) -> Vec<String> {
+    let service = tab.service.as_deref().unwrap_or("org.gnome.Terminal");
+    [
+        "call",
+        "--session",
+        "--dest",
+        service,
+        "--object-path",
+        "/org/gnome/Terminal/SearchProvider",
+        "--method",
+        "org.gnome.Shell.SearchProvider2.ActivateResult",
+        &tab.id,
+        "[]",
+        "0",
+    ]
+    .map(str::to_string)
+    .to_vec()
 }
 
 /// A PowerShell script that focuses a session's terminal.
@@ -258,11 +313,31 @@ pub fn focus_session(
             None,
             host,
         ),
+        (Env::Linux, PidDomain::Linux) => {
+            let tab = std::fs::read(format!("/proc/{pid}/environ"))
+                .ok()
+                .as_deref()
+                .and_then(parse_gnome_terminal_tab)
+                .ok_or("focusing a terminal on Linux works only with GNOME Terminal")?;
+            run_gnome_terminal_focus(&tab)
+        }
         (host_env, _) => Err(format!(
             "focusing a terminal isn't supported on {}",
             host_env.display_name()
         )),
     }
+}
+
+/// Asks GNOME Terminal to raise `tab`. Fire-and-forget, like the other helpers.
+fn run_gnome_terminal_focus(tab: &GnomeTerminalTab) -> Result<String, String> {
+    Command::new("gdbus")
+        .args(gnome_terminal_focus_args(tab))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| String::new())
+        .map_err(|e| format!("could not run gdbus to focus the terminal: {e}"))
 }
 
 /// Spawns the focus helper inside a WSL distro. Fire-and-forget, like `run_focus_script`.
@@ -384,6 +459,70 @@ mod tests {
         assert_eq!(parse_interop_socket(b"WSL_INTEROP=\0"), None);
         assert_eq!(parse_interop_socket(b"TERM=xterm\0"), None);
         assert_eq!(parse_interop_socket(b""), None);
+    }
+
+    #[test]
+    fn reads_the_sessions_gnome_terminal_tab_from_its_environ() {
+        let environ = b"SHELL=/bin/zsh\0GNOME_TERMINAL_SCREEN=/org/gnome/Terminal/screen/4887d8bd_0d54_4c28_b108_761eae95b56c\0GNOME_TERMINAL_SERVICE=:1.102\0TERM=xterm-256color\0";
+        // The search provider names tabs by the screen's UUID with dashes, not D-Bus underscores.
+        assert_eq!(
+            parse_gnome_terminal_tab(environ),
+            Some(GnomeTerminalTab {
+                service: Some(":1.102".into()),
+                id: "4887d8bd-0d54-4c28-b108-761eae95b56c".into(),
+            })
+        );
+        // Without the service name, the well-known one is used later on.
+        assert_eq!(
+            parse_gnome_terminal_tab(b"GNOME_TERMINAL_SCREEN=/org/gnome/Terminal/screen/ab_cd\0"),
+            Some(GnomeTerminalTab {
+                service: None,
+                id: "ab-cd".into(),
+            })
+        );
+        assert_eq!(parse_gnome_terminal_tab(b"GNOME_TERMINAL_SCREEN=\0"), None);
+        assert_eq!(
+            parse_gnome_terminal_tab(b"GNOME_TERMINAL_SCREEN=/org/gnome/Terminal/screen/\0"),
+            None
+        );
+        assert_eq!(
+            parse_gnome_terminal_tab(b"GNOME_TERMINAL_SCREEN=/some/other/path\0"),
+            None
+        );
+        assert_eq!(parse_gnome_terminal_tab(b"TERM=xterm\0"), None);
+        assert_eq!(parse_gnome_terminal_tab(b""), None);
+    }
+
+    #[test]
+    fn a_gnome_terminal_tab_is_raised_through_its_search_provider() {
+        let tab = GnomeTerminalTab {
+            service: Some(":1.102".into()),
+            id: "ab-cd".into(),
+        };
+        assert_eq!(
+            gnome_terminal_focus_args(&tab),
+            [
+                "call",
+                "--session",
+                "--dest",
+                ":1.102",
+                "--object-path",
+                "/org/gnome/Terminal/SearchProvider",
+                "--method",
+                "org.gnome.Shell.SearchProvider2.ActivateResult",
+                "ab-cd",
+                "[]",
+                "0",
+            ]
+        );
+        let anonymous = GnomeTerminalTab {
+            service: None,
+            id: "ab-cd".into(),
+        };
+        assert_eq!(
+            gnome_terminal_focus_args(&anonymous)[3],
+            "org.gnome.Terminal"
+        );
     }
 
     #[test]
@@ -542,12 +681,6 @@ mod tests {
 
     #[test]
     fn unsupported_hosts_explain_themselves() {
-        let linux = HostContext {
-            env: Env::Linux,
-            wsl_mount_root: "/mnt/".into(),
-        };
-        let error = focus_session(1, PidDomain::Linux, &Env::Linux, &linux, None).unwrap_err();
-        assert_eq!(error, "focusing a terminal isn't supported on Linux");
         let mac = HostContext {
             env: Env::MacOs,
             wsl_mount_root: "/mnt/".into(),

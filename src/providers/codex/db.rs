@@ -79,7 +79,13 @@ fn read_only_uri(db: &Path) -> String {
 pub fn listable_threads(db: &Path) -> anyhow::Result<Vec<Thread>> {
     // A URI, not a plain path: `mode=ro` (and, per `read_only_uri`, sometimes `immutable=1`)
     // only take effect this way, and neither can create or migrate the file.
-    let uri = read_only_uri(db);
+    match query_threads(&read_only_uri(db)) {
+        Err(e) if is_shared_memory_error(&e) => Ok(read_from_snapshot(db)?),
+        other => Ok(other?),
+    }
+}
+
+fn query_threads(uri: &str) -> rusqlite::Result<Vec<Thread>> {
     let conn = rusqlite::Connection::open_with_flags(
         uri,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
@@ -106,7 +112,67 @@ pub fn listable_threads(db: &Path) -> anyhow::Result<Vec<Thread>> {
             recency_at_ms: row.get(8)?,
         })
     })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    rows.collect()
+}
+
+/// SQLite could not set up the shared-memory index (`-shm`) a WAL database needs. This is what a
+/// database with a live `-wal` looks like from WSL when it sits on a Windows drive
+/// (`/mnt/c/...`): that filesystem can't memory-map the shared file, so every read fails with
+/// `SQLITE_IOERR_SHMMAP` ("disk I/O error", code 4618) however healthy the database is.
+fn is_shared_memory_error(e: &rusqlite::Error) -> bool {
+    use rusqlite::ffi;
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _) if matches!(
+            f.extended_code,
+            ffi::SQLITE_IOERR_SHMOPEN
+                | ffi::SQLITE_IOERR_SHMSIZE
+                | ffi::SQLITE_IOERR_SHMLOCK
+                | ffi::SQLITE_IOERR_SHMMAP
+        )
+    )
+}
+
+/// A private directory in the system temp dir, removed on drop.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn new() -> std::io::Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("ccpick-codex-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Fallback for a database whose shared memory can't be mapped in place: copy the database and
+/// its `-wal` into a scratch directory on a normal filesystem and read the copy. The copy's
+/// `-shm` is created (and deleted) there, so nothing is ever written to Codex's directory, and
+/// the WAL is replayed so the read is current rather than stale.
+///
+/// The database is copied *before* the WAL on purpose. If Codex checkpoints in between, a newer
+/// database with an older WAL is harmless, but an older database with a newer WAL is not, and
+/// the worst case of the order used here is a slightly stale list.
+fn read_from_snapshot(db: &Path) -> anyhow::Result<Vec<Thread>> {
+    let scratch = ScratchDir::new()?;
+    let copy = scratch.0.join("state.sqlite");
+    std::fs::copy(db, &copy)?;
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    match std::fs::copy(&wal, scratch.0.join("state.sqlite-wal")) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(query_threads(&format!("file:{}?mode=ro", copy.display()))?)
 }
 
 /// Re-exported so `providers::codex::sources`'s tests build on the exact same fixture as this
@@ -213,6 +279,59 @@ mod tests {
             !sidecar("-shm").exists(),
             "reading created a shared-memory sidecar"
         );
+    }
+
+    #[test]
+    fn the_snapshot_read_sees_rows_still_in_the_wal_and_leaves_the_original_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tests_fixture(tmp.path());
+        // A live Codex: WAL mode, connection held open, a row that exists only in the WAL.
+        let live = rusqlite::Connection::open(&db).unwrap();
+        live.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+             INSERT INTO threads VALUES
+               ('id-wal','/s/rollout-w.jsonl','/home/me','Only in the WAL',NULL,'hi',NULL,5,9999,'cli',0);",
+        )
+        .unwrap();
+        let before: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+
+        let ids: Vec<String> = read_from_snapshot(&db)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+
+        assert_eq!(ids[0], "id-wal", "the WAL row is visible, newest first");
+        let after: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "the original directory is untouched");
+    }
+
+    #[test]
+    fn only_shared_memory_failures_trigger_the_snapshot_fallback() {
+        use rusqlite::ffi;
+        let err = |code: i32| {
+            rusqlite::Error::SqliteFailure(
+                ffi::Error {
+                    code: ffi::ErrorCode::SystemIoFailure,
+                    extended_code: code,
+                },
+                None,
+            )
+        };
+        assert!(
+            is_shared_memory_error(&err(4618)),
+            "SHMMAP, as seen on /mnt/c"
+        );
+        assert!(!is_shared_memory_error(&err(ffi::SQLITE_IOERR)));
+        assert!(!is_shared_memory_error(
+            &rusqlite::Error::QueryReturnedNoRows
+        ));
     }
 
     #[test]

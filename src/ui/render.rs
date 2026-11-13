@@ -1,5 +1,5 @@
 //! Drawing the TUI from App state.
-use super::app::{App, Focus, Notice, PreviewMetrics, Row};
+use super::app::{App, Focus, PreviewMetrics, ResumePrompt, Row};
 use crate::format::{exact, friendly, shorten_home_in};
 use crate::model::{Message, Role};
 use ratatui::Frame;
@@ -86,27 +86,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64) {
     if app.dialog.is_some() {
         draw_dialog(frame, app);
     }
-    if let Some(idx) = app.resume_prompt {
-        draw_resume_confirm(frame, app, idx);
+    if let Some(prompt) = &app.resume_prompt {
+        draw_resume_confirm(frame, app, prompt);
     }
     if app.confirm_quit {
         draw_quit_confirm(frame);
     }
-    // Last, so it covers whatever was already open.
-    if let Some(notice) = &app.notice {
-        draw_notice(frame, notice);
-    }
 }
 
-fn draw_notice(frame: &mut Frame, notice: &Notice) {
-    let mut lines: Vec<Line<'static>> = notice.lines.iter().cloned().map(Line::from).collect();
-    lines.push(Line::from(""));
-    lines.push(Line::from(" any key close").dim());
-    draw_modal(frame, &notice.title, lines, 60);
-}
-
-fn draw_resume_confirm(frame: &mut Frame, app: &App, idx: usize) {
-    let session = &app.catalog.sessions[idx];
+fn draw_resume_confirm(frame: &mut Frame, app: &App, prompt: &ResumePrompt) {
+    let session = &app.catalog.sessions[prompt.session];
     let running = match session.live {
         Some((pid, source)) => format!(
             "Running in {} (pid {pid}).",
@@ -114,17 +103,22 @@ fn draw_resume_confirm(frame: &mut Frame, app: &App, idx: usize) {
         ),
         None => "Marked as running.".into(),
     };
-    draw_modal(
-        frame,
-        " Resume here ",
-        vec![
-            Line::from(running),
-            Line::from("Resume it here anyway?"),
-            Line::from(""),
-            Line::from(" y / ↵ resume here   any other key cancel").dim(),
-        ],
-        50,
-    );
+    let mut lines = vec![Line::from(running)];
+    // When focusing failed, say so here rather than in a dialog of its own.
+    if let Some(reason) = &prompt.reason {
+        lines.push(Line::from(Span::styled(
+            reason.clone(),
+            Style::new().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from("Resume it here anyway?"));
+    lines.push(Line::from(""));
+    lines.push(Line::from(" y / ↵ resume here   any other key cancel").dim());
+    let title = match prompt.reason {
+        Some(_) => " Can't focus ",
+        None => " Resume here ",
+    };
+    draw_modal(frame, title, lines, 60);
 }
 
 fn draw_quit_confirm(frame: &mut Frame) {
@@ -871,12 +865,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_a_focus_notice_over_the_list() {
+    fn a_failed_focus_explains_itself_and_offers_to_resume_in_one_dialog() {
         let mut app = App::new(Arc::new(crate::catalog::fake_catalog()), "");
         app.set_focus_result(
-            4242,
-            1,
-            Err("its terminal (code) can't be focused; only GNOME Terminal is supported".into()),
+            2,
+            Err(
+                "its terminal (Visual Studio Code) can't be focused; only GNOME Terminal is \
+                 supported"
+                    .into(),
+            ),
         );
         let text: String = draw_to(&mut app, 100, 30)
             .content()
@@ -885,8 +882,10 @@ mod tests {
             .collect();
         assert!(text.contains("Can't focus"));
         assert!(text.contains("Running in two (pid 4242)."));
-        assert!(text.contains("Its terminal (code) can't be focused"));
-        assert!(text.contains("any key close"));
+        assert!(text.contains("Its terminal (Visual Studio Code) can't be focused"));
+        // The offer is right there, rather than behind a second Enter.
+        assert!(text.contains("Resume it here anyway?"));
+        assert!(text.contains("resume here"));
     }
 
     #[test]

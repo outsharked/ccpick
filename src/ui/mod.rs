@@ -94,7 +94,12 @@ fn event_loop(
                     Err(err) => app.status = Some(format!("could not refresh: {err}")),
                 }
             }
-            Action::Focus { pid, source, title } => {
+            Action::Focus {
+                pid,
+                source,
+                session,
+                title,
+            } => {
                 let env = app.catalog.sources[source].env.clone();
                 let result = match crate::process::PidDomain::of(&env) {
                     Some(domain) => crate::focus::focus_session(
@@ -106,7 +111,7 @@ fn event_loop(
                     ),
                     None => Err("no process model for this environment".into()),
                 };
-                app.set_focus_result(pid, source, result);
+                app.set_focus_result(session, result);
             }
             Action::Copy(text) => {
                 let result = crate::clipboard::copy(&text, &app.catalog.host);

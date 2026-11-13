@@ -41,6 +41,8 @@ pub enum Action {
     Focus {
         pid: u32,
         source: usize,
+        /// The session's index, so a failure can offer to resume this one here.
+        session: usize,
         title: String,
     },
 }
@@ -68,13 +70,14 @@ fn sentence(error: &str) -> String {
     out
 }
 
-/// A message the user has to dismiss, drawn over everything else. Used where the status line
-/// is too easy to miss: focusing a session is a deliberate act that visibly does nothing when it
-/// fails, so the reason has to be put in the way.
+/// The offer to resume a session that is already running somewhere else. It carries the reason
+/// focusing failed when that is what raised it, so the explanation and the one thing the user
+/// can do about it are the same dialog rather than two in a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Notice {
-    pub title: String,
-    pub lines: Vec<String>,
+pub struct ResumePrompt {
+    pub session: usize,
+    /// Why its terminal couldn't be raised; `None` when the user asked for this outright.
+    pub reason: Option<String>,
 }
 
 /// Preview geometry reported by the renderer each frame, used to clamp scrolling.
@@ -110,13 +113,11 @@ pub struct App {
     pub(crate) preview_layout: Option<super::render::PreviewLayout>,
     pub status: Option<String>,
     pub dialog: Option<ResumeDialog>,
-    /// A modal message awaiting any key.
-    pub notice: Option<Notice>,
     /// Esc asks before quitting, so a stray Esc while typing doesn't drop the session list.
     pub confirm_quit: bool,
     /// A running session the user pressed Enter on twice in a row: asks whether to resume it here
     /// anyway (the process may be a stale record, and Claude allows a second resume).
-    pub resume_prompt: Option<usize>,
+    pub resume_prompt: Option<ResumePrompt>,
     /// The session the previous key was an Enter on; any other key clears it.
     last_enter: Option<usize>,
     source_override: HashMap<usize, usize>,
@@ -143,7 +144,6 @@ impl App {
             preview_layout: None,
             status: None,
             dialog: None,
-            notice: None,
             confirm_quit: false,
             resume_prompt: None,
             last_enter: None,
@@ -408,24 +408,22 @@ impl App {
         }
     }
 
-    /// Records what focusing a session did. Success is silent (the terminal is now in front);
-    /// a failure opens a notice, because the window the user expected to see simply isn't there
-    /// and a status line doesn't say why loudly enough.
-    pub fn set_focus_result(&mut self, pid: u32, source: usize, result: Result<String, String>) {
+    /// Records what focusing a session did. Success is silent -- the terminal is now in front.
+    /// A failure opens the resume prompt with the reason in it: the window the user expected
+    /// simply didn't appear, and resuming the session here is the only thing left to offer, so
+    /// it is offered at once instead of waiting for them to press Enter a second time.
+    pub fn set_focus_result(&mut self, session: usize, result: Result<String, String>) {
         match result {
             Ok(message) if message.is_empty() => self.status = None,
             Ok(message) => self.status = Some(message),
             Err(error) => {
                 self.status = None;
-                self.notice = Some(Notice {
-                    title: " Can't focus ".into(),
-                    lines: vec![
-                        format!(
-                            "Running in {} (pid {pid}).",
-                            self.catalog.sources[source].name
-                        ),
-                        sentence(&error),
-                    ],
+                // The offer has been made, so a later Enter retries focusing rather than
+                // skipping straight back to this.
+                self.last_enter = None;
+                self.resume_prompt = Some(ResumePrompt {
+                    session,
+                    reason: Some(sentence(&error)),
                 });
             }
         }
@@ -481,8 +479,12 @@ impl App {
         let session = &self.catalog.sessions[idx];
         if let Some((pid, source)) = session.live {
             if self.last_enter == Some(idx) {
-                // Enter twice: focusing didn't do what the user wanted, so offer to resume it here.
-                self.resume_prompt = Some(idx);
+                // Enter twice: focusing worked but isn't what the user wanted after all, so
+                // offer to resume it here. A focus that *failed* has already offered.
+                self.resume_prompt = Some(ResumePrompt {
+                    session: idx,
+                    reason: None,
+                });
                 return Action::None;
             }
             self.last_enter = Some(idx);
@@ -492,7 +494,12 @@ impl App {
             ));
             let title = session.meta.title.clone();
             return match u32::try_from(pid) {
-                Ok(pid) => Action::Focus { pid, source, title },
+                Ok(pid) => Action::Focus {
+                    pid,
+                    source,
+                    session: idx,
+                    title,
+                },
                 Err(_) => Action::None,
             };
         }
@@ -550,14 +557,8 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
-        // A notice is read, not answered: any key closes it and does nothing else, so a stray
-        // keystroke can't quit or resume something by accident.
-        if self.notice.is_some() {
-            self.notice = None;
-            return Action::None;
-        }
-        if let Some(idx) = self.resume_prompt {
-            return self.handle_resume_prompt_key(key, idx);
+        if let Some(prompt) = self.resume_prompt.clone() {
+            return self.handle_resume_prompt_key(key, prompt.session);
         }
         if key.code != KeyCode::Enter {
             self.last_enter = None;
@@ -774,7 +775,13 @@ mod tests {
         a.selected = 2;
         a.handle_key(key(KeyCode::Enter));
         assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
-        assert_eq!(a.resume_prompt, Some(2));
+        let prompt = a
+            .resume_prompt
+            .clone()
+            .expect("the second Enter offers to resume");
+        assert_eq!(prompt.session, 2);
+        // Nothing to explain: focusing worked, the user asked for this by pressing Enter again.
+        assert_eq!(prompt.reason, None);
     }
 
     #[test]
@@ -880,6 +887,7 @@ mod tests {
             Action::Focus {
                 pid: 4242,
                 source: 1,
+                session: 2,
                 title: "Running thing".into()
             }
         );
@@ -924,6 +932,7 @@ mod tests {
             Action::Focus {
                 pid: 777,
                 source: 0,
+                session: 0,
                 title: "Investigate the flaky retry test".into(),
             }
         );
@@ -1108,56 +1117,59 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_cannot_be_focused_says_so_in_a_notice() {
+    fn a_failed_focus_offers_to_resume_in_the_same_dialog() {
         let mut a = app("");
         a.status = Some("stale".into());
         a.set_focus_result(
-            4242,
-            1,
-            Err("its terminal (code) can't be focused; only GNOME Terminal is supported".into()),
+            2,
+            Err("its terminal (Visual Studio Code) can't be focused".into()),
         );
-        let notice = a.notice.clone().expect("a failure opens a notice");
-        assert_eq!(notice.lines[0], "Running in two (pid 4242).");
-        // Shown as its own sentence, not as the fragment the error is.
+        let prompt = a.resume_prompt.clone().expect("a failure opens the prompt");
+        assert_eq!(prompt.session, 2);
+        // Shown as a sentence of its own, not as the fragment the error is.
         assert_eq!(
-            notice.lines[1],
-            "Its terminal (code) can't be focused; only GNOME Terminal is supported."
+            prompt.reason.as_deref(),
+            Some("Its terminal (Visual Studio Code) can't be focused.")
         );
-        // The status line is left out of it, rather than saying the same thing twice.
+        // The status line is left out of it rather than saying the same thing twice.
         assert_eq!(a.status, None);
+        // And the offer is live: one key resumes, no second Enter needed.
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Char('y'))),
+            Action::Launch(_)
+        ));
+        assert_eq!(a.resume_prompt, None);
+    }
+
+    #[test]
+    fn a_dismissed_focus_failure_tries_focusing_again_rather_than_reoffering() {
+        let mut a = app("");
+        a.selected = 2;
+        // Enter focuses; it fails and offers.
+        a.handle_key(key(KeyCode::Enter));
+        a.set_focus_result(2, Err("nope".into()));
+        // Any other key declines without resuming.
+        assert_eq!(a.handle_key(key(KeyCode::Char('n'))), Action::None);
+        assert_eq!(a.resume_prompt, None);
+        // The next Enter is a fresh attempt at focusing, not the offer again.
+        assert!(matches!(
+            a.handle_key(key(KeyCode::Enter)),
+            Action::Focus { session: 2, .. }
+        ));
+        assert_eq!(a.resume_prompt, None);
     }
 
     #[test]
     fn focusing_a_terminal_that_was_raised_shows_nothing() {
         let mut a = app("");
         a.status = Some("stale".into());
-        a.set_focus_result(4242, 1, Ok(String::new()));
-        assert_eq!(a.notice, None);
+        a.set_focus_result(2, Ok(String::new()));
+        assert_eq!(a.resume_prompt, None);
         assert_eq!(a.status, None);
-        // A helper that has something to say still says it in the status line.
-        a.set_focus_result(4242, 1, Ok("focusing…".into()));
-        assert_eq!(a.notice, None);
+        // A helper with something to say still says it in the status line.
+        a.set_focus_result(2, Ok("focusing…".into()));
+        assert_eq!(a.resume_prompt, None);
         assert_eq!(a.status.as_deref(), Some("focusing…"));
-    }
-
-    #[test]
-    fn any_key_closes_a_notice_and_does_nothing_else() {
-        let mut a = app("");
-        a.set_focus_result(4242, 1, Err("nope".into()));
-        // `q` would otherwise be typed into the query, and Enter would resume the selection:
-        // while a notice is up, the key only closes it.
-        assert_eq!(a.handle_key(key(KeyCode::Char('q'))), Action::None);
-        assert_eq!(a.notice, None);
-        assert_eq!(a.query, "");
-        a.set_focus_result(4242, 1, Err("nope".into()));
-        assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
-        assert_eq!(a.notice, None);
-        // Closed, so the next key does its ordinary job again.
-        assert_eq!(
-            a.handle_key(key(KeyCode::Char('q'))),
-            Action::Search("q".into())
-        );
-        assert_eq!(a.query, "q");
     }
 
     #[test]

@@ -206,13 +206,14 @@ resume it here anyway. Nothing is killed.
   title — so if the terminal's title has drifted from the one ccpick shows, the window is raised
   without switching tabs. This works from Windows and from another distro too, by running the
   helper inside the session's own distro.
-- If no terminal can be found, a notice says the session is running and why its terminal can't
-  be raised. Any key closes it.
+- If no terminal can be found, the resume prompt opens with the reason in it — naming the app
+  the session is running in, as its desktop entry names it — and offers to resume the session
+  here instead.
 
 On Linux, this works for sessions running in GNOME Terminal, including under Wayland: ccpick
 reads the tab's id from the session's environment and asks GNOME Terminal to bring that tab to
 the front, the same way picking a terminal from the desktop search does. Other Linux terminals
-don't offer a way to do this, so for them the notice names the app the session is running in.
+don't offer a way to do this, so for them the prompt names the app the session is running in.
 
 That notice is also what a session hosted by another app's terminal gets — VS Code's integrated
 terminal, say — even though such a session inherits GNOME Terminal's variables from whichever tab

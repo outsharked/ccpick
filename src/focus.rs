@@ -121,8 +121,9 @@ pub enum TerminalHost {
     /// A GNOME Terminal tab, so `GNOME_TERMINAL_SCREEN` is this session's own tab and can be
     /// acted on.
     GnomeTerminal,
-    /// Another app, named as `/proc` gives it. Any tab id the session carries is inherited.
-    Other(String),
+    /// Another app: the pid it was found at, and the name `/proc` gives it (truncated to 15
+    /// bytes by the kernel). Any tab id the session carries was inherited from it.
+    Other { pid: u32, name: String },
     /// Nothing readable to go on.
     Unknown,
 }
@@ -150,34 +151,200 @@ pub fn terminal_host(pid: u32, read_status: impl Fn(u32) -> Option<String>) -> T
         // at init, so the useful name is the outermost one between them -- the app, not the
         // shell it happens to run.
         if hop > 0 && !name.is_empty() && !INIT_NAMES.contains(&name) {
-            host = Some(name.to_string());
+            host = Some((current, name.to_string()));
         }
         match parse_proc_status(&status).0 {
             Some(parent) if parent != 0 && parent != current => current = parent,
             _ => break,
         }
     }
-    host.map_or(TerminalHost::Unknown, TerminalHost::Other)
+    host.map_or(TerminalHost::Unknown, |(pid, name)| TerminalHost::Other {
+        pid,
+        name,
+    })
+}
+
+/// The basename of `argv[0]` from a `/proc/<pid>/cmdline`. Unlike `/proc`'s `Name` this isn't
+/// truncated, and it is what a desktop entry's `Exec` can be matched against.
+pub fn exec_basename(cmdline: &[u8]) -> Option<&str> {
+    let argv0 = cmdline.split(|b| *b == 0).next()?;
+    let argv0 = std::str::from_utf8(argv0).ok()?;
+    basename(argv0).filter(|name| !name.is_empty())
+}
+
+fn basename(path: &str) -> Option<&str> {
+    path.rsplit('/').next()
+}
+
+/// The `Name` and `Exec` basename of a desktop entry, or `None` when it isn't an application the
+/// user would recognise: `NoDisplay`/`Hidden` entries exist for things like VS Code's URL
+/// handler, whose name ("Visual Studio Code - URL Handler") describes no window anyone sees.
+/// Only the `[Desktop Entry]` section counts -- the `[Desktop Action ...]` sections that follow
+/// carry names of their own ("New Empty Window") for items in an app's right-click menu.
+pub fn parse_desktop_entry(text: &str) -> Option<(&str, &str)> {
+    let mut name = None;
+    let mut exec = None;
+    let mut is_application = true;
+    let mut lines = text.lines().skip_while(|l| l.trim() != "[Desktop Entry]");
+    lines.next()?;
+    for line in lines.take_while(|l| !l.trim_start().starts_with('[')) {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "Name" => name = name.or(Some(value)),
+            "Exec" => exec = exec.or(Some(value)),
+            "Type" => is_application = value == "Application",
+            "NoDisplay" | "Hidden" if value == "true" => return None,
+            _ => {}
+        }
+    }
+    if !is_application {
+        return None;
+    }
+    Some((name?, basename(exec_program(exec?)?)?))
+}
+
+/// The program an `Exec=` line runs. Its first token is not always it: the line can be prefixed
+/// with `env VAR=value`, and a path with spaces in it is quoted, so splitting on whitespace
+/// would cut `"/opt/My App/bin/app"` in half.
+fn exec_program(exec: &str) -> Option<&str> {
+    let mut rest = exec.trim_start();
+    while !rest.is_empty() {
+        let (token, remainder) = match rest.strip_prefix('"') {
+            Some(quoted) => {
+                let end = quoted.find('"')?;
+                (&quoted[..end], &quoted[end + 1..])
+            }
+            None => match rest.find(char::is_whitespace) {
+                Some(end) => (&rest[..end], &rest[end..]),
+                None => (rest, ""),
+            },
+        };
+        if !token.is_empty() && token != "env" && !token.contains('=') {
+            return Some(token);
+        }
+        rest = remainder.trim_start();
+    }
+    None
+}
+
+/// The name a desktop entry gives the program `exec`, so a refusal can say "Visual Studio Code"
+/// where `/proc` only offers `code`.
+pub fn desktop_app_name<'a>(
+    exec: &str,
+    entries: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    entries.into_iter().find_map(|text| {
+        let (name, program) = parse_desktop_entry(text)?;
+        (program == exec).then(|| name.to_string())
+    })
 }
 
 /// The GNOME Terminal tab `pid` runs in: its own tab id, never one it inherited. `read_environ`
-/// and `read_status` give `/proc/<pid>/environ` and `/proc/<pid>/status`. The error names the app
-/// in the way, when the walk found one.
+/// and `read_status` give `/proc/<pid>/environ` and `/proc/<pid>/status`, and `app_name` turns
+/// the app in the way into something to call it by, so the refusal can name it.
 pub fn gnome_terminal_tab(
     pid: u32,
     read_environ: impl Fn(u32) -> Option<Vec<u8>>,
     read_status: impl Fn(u32) -> Option<String>,
+    app_name: impl Fn(u32, &str) -> String,
 ) -> Result<GnomeTerminalTab, String> {
     match terminal_host(pid, read_status) {
         TerminalHost::GnomeTerminal => read_environ(pid)
             .as_deref()
             .and_then(parse_gnome_terminal_tab)
             .ok_or_else(|| LINUX_FOCUS_UNSUPPORTED.to_string()),
-        TerminalHost::Other(name) => Err(format!(
-            "its terminal ({name}) can't be focused; only GNOME Terminal is supported"
+        TerminalHost::Other { pid, name } => Err(format!(
+            "its terminal ({}) can't be focused; only GNOME Terminal is supported",
+            app_name(pid, &name)
         )),
         TerminalHost::Unknown => Err(LINUX_FOCUS_UNSUPPORTED.to_string()),
     }
+}
+
+/// Desktop-entry directories, in XDG precedence order: the user's own first.
+fn desktop_entry_dirs() -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        });
+    let system =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    home.into_iter()
+        .chain(system.split(':').filter(|d| !d.is_empty()).map(Into::into))
+        .map(|dir| dir.join("applications"))
+        .collect()
+}
+
+/// Every installed desktop entry's contents. Only read when focusing has already failed, so the
+/// cost lands on the path that is about to stop and explain itself anyway.
+fn read_desktop_entries() -> Vec<String> {
+    /// More than any desktop has, and enough that a directory of junk can't stall the UI.
+    const MAX_ENTRIES: usize = 2000;
+    let mut out = Vec::new();
+    for dir in desktop_entry_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_ENTRIES {
+                return out;
+            }
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "desktop")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+/// Names to try for the program at `pid`, best first. `argv[0]`'s basename is the obvious one,
+/// but a process that has rewritten its title has its arguments in there too -- Electron apps do
+/// this, so VS Code's `argv[0]` is the single string `/usr/share/code/code .` -- which is why
+/// what precedes the first space is tried as well. The `/proc` name comes last: the kernel
+/// truncates it to 15 bytes, so it is the least likely of the three to match an entry.
+pub fn program_candidates<'a>(cmdline: &'a [u8], proc_name: &'a str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    if let Some(argv0) = exec_basename(cmdline) {
+        out.push(argv0);
+        if let Some((before_space, _)) = argv0.split_once(char::is_whitespace)
+            && !before_space.is_empty()
+        {
+            out.push(before_space);
+        }
+    }
+    if !proc_name.is_empty() {
+        out.push(proc_name);
+    }
+    out.dedup();
+    out
+}
+
+/// What to call the app running at `pid`: the name its desktop entry gives it, else the program
+/// itself. `proc_name` is what `/proc` called it, used when the command line says nothing.
+fn linux_app_name(pid: u32, proc_name: &str) -> String {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let candidates = program_candidates(&cmdline, proc_name);
+    let entries = read_desktop_entries();
+    if let Some(name) = candidates
+        .iter()
+        .find_map(|program| desktop_app_name(program, entries.iter().map(String::as_str)))
+    {
+        return name;
+    }
+    // Nothing installed matches, so show the program itself -- but never a title with arguments
+    // trailing off it.
+    candidates
+        .iter()
+        .find(|program| !program.contains(char::is_whitespace))
+        .unwrap_or(&proc_name)
+        .to_string()
 }
 
 /// `gdbus` arguments that bring `tab` to the front: the call GNOME Shell makes when a terminal
@@ -406,6 +573,7 @@ pub fn focus_session(
                 pid,
                 |p| std::fs::read(format!("/proc/{p}/environ")).ok(),
                 |p| std::fs::read_to_string(format!("/proc/{p}/status")).ok(),
+                linux_app_name,
             )?;
             run_gnome_terminal_focus(&tab)
         }
@@ -592,6 +760,10 @@ mod tests {
         }
     }
 
+    fn stub_app_name(_pid: u32, name: &str) -> String {
+        name.to_string()
+    }
+
     const TAB_ENVIRON: &[u8] =
         b"GNOME_TERMINAL_SCREEN=/org/gnome/Terminal/screen/ab_cd\0GNOME_TERMINAL_SERVICE=:1.102\0";
 
@@ -606,7 +778,7 @@ mod tests {
         ]);
         assert_eq!(terminal_host(100, &proc), TerminalHost::GnomeTerminal);
         assert_eq!(
-            gnome_terminal_tab(100, |_| Some(TAB_ENVIRON.to_vec()), &proc),
+            gnome_terminal_tab(100, |_| Some(TAB_ENVIRON.to_vec()), &proc, stub_app_name),
             Ok(GnomeTerminalTab {
                 service: Some(":1.102".into()),
                 id: "ab-cd".into(),
@@ -638,11 +810,23 @@ mod tests {
         ]);
         assert_eq!(
             terminal_host(200, &proc),
-            TerminalHost::Other("code".into())
+            // The outermost `code`, which is VS Code itself rather than one of its helpers.
+            TerminalHost::Other {
+                pid: 170,
+                name: "code".into()
+            }
         );
+        // The name comes from the app found in the chain, not from the session's own process.
         assert_eq!(
-            gnome_terminal_tab(200, |_| Some(TAB_ENVIRON.to_vec()), &proc),
-            Err("its terminal (code) can't be focused; only GNOME Terminal is supported".into())
+            gnome_terminal_tab(
+                200,
+                |_| Some(TAB_ENVIRON.to_vec()),
+                &proc,
+                |pid, name| format!("{name}@{pid}")
+            ),
+            Err(
+                "its terminal (code@170) can't be focused; only GNOME Terminal is supported".into()
+            )
         );
     }
 
@@ -651,7 +835,7 @@ mod tests {
         // Nothing to read: the process is gone, and nothing can be said about its terminal.
         assert_eq!(terminal_host(1, |_| None), TerminalHost::Unknown);
         assert_eq!(
-            gnome_terminal_tab(1, |_| Some(TAB_ENVIRON.to_vec()), |_| None),
+            gnome_terminal_tab(1, |_| Some(TAB_ENVIRON.to_vec()), |_| None, stub_app_name),
             Err(LINUX_FOCUS_UNSUPPORTED.into())
         );
         // Its own parent, and a two-process cycle: both end rather than spin, and neither is
@@ -663,13 +847,121 @@ mod tests {
         // In a tab, but with no tab id to act on.
         let in_tab = status_reader(vec![(100, "gnome-terminal-", 1)]);
         assert_eq!(
-            gnome_terminal_tab(100, |_| Some(b"TERM=xterm\0".to_vec()), &in_tab),
+            gnome_terminal_tab(
+                100,
+                |_| Some(b"TERM=xterm\0".to_vec()),
+                &in_tab,
+                stub_app_name
+            ),
             Err(LINUX_FOCUS_UNSUPPORTED.into())
         );
         assert_eq!(
-            gnome_terminal_tab(100, |_| None, &in_tab),
+            gnome_terminal_tab(100, |_| None, &in_tab, stub_app_name),
             Err(LINUX_FOCUS_UNSUPPORTED.into())
         );
+    }
+
+    #[test]
+    fn an_app_is_named_as_its_desktop_entry_names_it() {
+        // VS Code's entry, as installed: the program is an absolute path, and a second entry for
+        // its URL handler carries a name that describes no window anyone sees.
+        let vscode = concat!(
+            "[Desktop Entry]\n",
+            "Name=Visual Studio Code\n",
+            "Exec=/usr/share/code/code %F\n",
+            "Type=Application\n",
+            "StartupWMClass=com.microsoft.VSCode\n",
+            "\n",
+            "[Desktop Action new-empty-window]\n",
+            "Name=New Empty Window\n",
+            "Exec=/usr/share/code/code --new-window %F\n",
+        );
+        let url_handler = concat!(
+            "[Desktop Entry]\n",
+            "Name=Visual Studio Code - URL Handler\n",
+            "Exec=/usr/share/code/code --open-url %U\n",
+            "Type=Application\n",
+            "NoDisplay=true\n",
+        );
+        // The action section's own Name is not the app's.
+        assert_eq!(
+            parse_desktop_entry(vscode),
+            Some(("Visual Studio Code", "code"))
+        );
+        assert_eq!(parse_desktop_entry(url_handler), None);
+        // The hidden handler is listed first and still doesn't win.
+        assert_eq!(
+            desktop_app_name("code", [url_handler, vscode]),
+            Some("Visual Studio Code".into())
+        );
+        assert_eq!(desktop_app_name("ghostty", [vscode]), None);
+    }
+
+    #[test]
+    fn a_desktop_entry_that_names_no_usable_app_is_skipped() {
+        // A link isn't an app, and `Hidden` means uninstalled but left behind.
+        assert_eq!(
+            parse_desktop_entry("[Desktop Entry]\nName=Docs\nExec=x\nType=Link\n"),
+            None
+        );
+        assert_eq!(
+            parse_desktop_entry("[Desktop Entry]\nName=Old\nExec=old\nHidden=true\n"),
+            None
+        );
+        // No `[Desktop Entry]` section at all, and an entry with nothing to run.
+        assert_eq!(parse_desktop_entry("Name=Stray\nExec=stray\n"), None);
+        assert_eq!(parse_desktop_entry("[Desktop Entry]\nName=Nothing\n"), None);
+        // An `env` prefix and quoting are not the program being run.
+        assert_eq!(
+            parse_desktop_entry(
+                "[Desktop Entry]\nName=Wrapped\nExec=env G=1 \"/opt/My App/bin/app\" %U\n"
+            ),
+            Some(("Wrapped", "app"))
+        );
+    }
+
+    #[test]
+    fn a_process_that_rewrote_its_title_is_still_matched_to_its_app() {
+        // Electron rewrites argv[0] into one string, arguments and all, so the basename alone is
+        // `code .` and matches nothing. What precedes the space is the program.
+        let electron = b"/usr/share/code/code .\0";
+        assert_eq!(program_candidates(electron, "code"), vec!["code .", "code"]);
+        let vscode = concat!(
+            "[Desktop Entry]\n",
+            "Name=Visual Studio Code\n",
+            "Exec=/usr/share/code/code %F\n",
+            "Type=Application\n",
+        );
+        assert_eq!(desktop_app_name("code .", [vscode]), None);
+        assert_eq!(
+            program_candidates(electron, "code")
+                .iter()
+                .find_map(|p| desktop_app_name(p, [vscode])),
+            Some("Visual Studio Code".into())
+        );
+        // An ordinary process offers its basename once, with the truncated /proc name after it.
+        assert_eq!(
+            program_candidates(b"/usr/bin/ghostty\0--title\0x\0", "ghostty"),
+            vec!["ghostty"]
+        );
+        // Nothing readable: only what /proc called it.
+        assert_eq!(
+            program_candidates(b"", "gnome-text-edit"),
+            vec!["gnome-text-edit"]
+        );
+    }
+
+    #[test]
+    fn the_program_name_comes_from_the_command_line_untruncated() {
+        // `/proc` truncates `Name` at 15 bytes; argv[0] doesn't, and it is what a desktop
+        // entry's `Exec` can be matched against.
+        assert_eq!(exec_basename(b"/usr/share/code/code\0.\0"), Some("code"));
+        assert_eq!(
+            exec_basename(b"gnome-text-editor\0"),
+            Some("gnome-text-editor")
+        );
+        assert_eq!(exec_basename(b""), None);
+        assert_eq!(exec_basename(b"\0"), None);
     }
 
     #[test]

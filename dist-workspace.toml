@@ -17,3 +17,10 @@ install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin/"]
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+
+# dist defaults Apple Silicon to macos-14, which GitHub no longer offers ("The configuration
+# 'macos-14-arm64-us-default' is not supported"): that job failed instantly and cancelled the
+# jobs that publish the release, so v0.5.1 and the first v0.6.0 run built everything and
+# released nothing.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

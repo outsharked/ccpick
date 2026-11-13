@@ -1,5 +1,5 @@
 //! Drawing the TUI from App state.
-use super::app::{App, Focus, PreviewMetrics, Row};
+use super::app::{App, Focus, Notice, PreviewMetrics, Row};
 use crate::format::{exact, friendly, shorten_home_in};
 use crate::model::{Message, Role};
 use ratatui::Frame;
@@ -92,6 +92,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, now_ms: i64) {
     if app.confirm_quit {
         draw_quit_confirm(frame);
     }
+    // Last, so it covers whatever was already open.
+    if let Some(notice) = &app.notice {
+        draw_notice(frame, notice);
+    }
+}
+
+fn draw_notice(frame: &mut Frame, notice: &Notice) {
+    let mut lines: Vec<Line<'static>> = notice.lines.iter().cloned().map(Line::from).collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(" any key close").dim());
+    draw_modal(frame, &notice.title, lines, 60);
 }
 
 fn draw_resume_confirm(frame: &mut Frame, app: &App, idx: usize) {
@@ -857,6 +868,25 @@ mod tests {
                 .modifier
                 .contains(Modifier::DIM)
         );
+    }
+
+    #[test]
+    fn renders_a_focus_notice_over_the_list() {
+        let mut app = App::new(Arc::new(crate::catalog::fake_catalog()), "");
+        app.set_focus_result(
+            4242,
+            1,
+            Err("its terminal (code) can't be focused; only GNOME Terminal is supported".into()),
+        );
+        let text: String = draw_to(&mut app, 100, 30)
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Can't focus"));
+        assert!(text.contains("Running in two (pid 4242)."));
+        assert!(text.contains("Its terminal (code) can't be focused"));
+        assert!(text.contains("any key close"));
     }
 
     #[test]

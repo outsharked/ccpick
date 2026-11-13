@@ -13,6 +13,11 @@
 //! by that id, the same way picking a terminal from the desktop search does. Wayland doesn't let
 //! one program raise another's window, so going through the terminal itself is what makes this
 //! work there. Other Linux terminals expose nothing comparable.
+//!
+//! That variable is inherited, though, so carrying it does not mean a process is *in* that tab:
+//! an app launched from a tab passes the id on to terminals of its own (VS Code's integrated
+//! terminal is the case that bites). The ancestor chain is therefore walked to the terminal
+//! server before the id is trusted.
 use crate::env::{Env, HostContext};
 use crate::process::PidDomain;
 use std::process::{Command, Stdio};
@@ -90,6 +95,89 @@ pub fn parse_gnome_terminal_tab(environ: &[u8]) -> Option<GnomeTerminalTab> {
         service: environ_var(environ, "GNOME_TERMINAL_SERVICE").map(str::to_string),
         id: uuid.replace('_', "-"),
     })
+}
+
+/// Names `/proc/<pid>/status` can give GNOME Terminal's server. The kernel truncates `Name` to
+/// 15 bytes, which is just where `gnome-terminal-server` loses its `server`.
+const GNOME_TERMINAL_SERVER_NAMES: [&str; 2] = ["gnome-terminal-", "gnome-terminal-server"];
+
+/// `Name` from a `/proc/<pid>/status` file.
+fn parse_proc_name(text: &str) -> Option<&str> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("Name:"))
+        .map(str::trim)
+}
+
+/// Process names that mean the walk has reached the top without passing a terminal.
+const INIT_NAMES: [&str; 2] = ["systemd", "init"];
+
+/// The message for a session whose terminal offers no way to be raised.
+pub const LINUX_FOCUS_UNSUPPORTED: &str =
+    "focusing a terminal on Linux works only with GNOME Terminal";
+
+/// What a session's ancestry says about focusing it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TerminalHost {
+    /// A GNOME Terminal tab, so `GNOME_TERMINAL_SCREEN` is this session's own tab and can be
+    /// acted on.
+    GnomeTerminal,
+    /// Another app, named as `/proc` gives it. Any tab id the session carries is inherited.
+    Other(String),
+    /// Nothing readable to go on.
+    Unknown,
+}
+
+/// What runs `pid`, by walking its parents to the first terminal server.
+/// `GNOME_TERMINAL_SCREEN` is inherited by every descendant, so carrying one does not mean a
+/// process is *in* that tab: VS Code launched from a tab hands its id to every integrated
+/// terminal it opens, and focusing such a session would raise that unrelated tab -- or, once it
+/// has been closed, whatever the search provider falls back to, which looks like a tab picked at
+/// random. Finding the server in the chain is what distinguishes a session's own tab from one an
+/// ancestor was started in, and it rejects a session under a daemonized multiplexer too, where
+/// no one tab can be meant.
+pub fn terminal_host(pid: u32, read_status: impl Fn(u32) -> Option<String>) -> TerminalHost {
+    let mut current = pid;
+    let mut host = None;
+    for hop in 0..MAX_HOPS {
+        let Some(status) = read_status(current) else {
+            break;
+        };
+        let name = parse_proc_name(&status).unwrap_or_default();
+        if GNOME_TERMINAL_SERVER_NAMES.contains(&name) {
+            return TerminalHost::GnomeTerminal;
+        }
+        // The session itself names nothing the user doesn't already know, and every chain ends
+        // at init, so the useful name is the outermost one between them -- the app, not the
+        // shell it happens to run.
+        if hop > 0 && !name.is_empty() && !INIT_NAMES.contains(&name) {
+            host = Some(name.to_string());
+        }
+        match parse_proc_status(&status).0 {
+            Some(parent) if parent != 0 && parent != current => current = parent,
+            _ => break,
+        }
+    }
+    host.map_or(TerminalHost::Unknown, TerminalHost::Other)
+}
+
+/// The GNOME Terminal tab `pid` runs in: its own tab id, never one it inherited. `read_environ`
+/// and `read_status` give `/proc/<pid>/environ` and `/proc/<pid>/status`. The error names the app
+/// in the way, when the walk found one.
+pub fn gnome_terminal_tab(
+    pid: u32,
+    read_environ: impl Fn(u32) -> Option<Vec<u8>>,
+    read_status: impl Fn(u32) -> Option<String>,
+) -> Result<GnomeTerminalTab, String> {
+    match terminal_host(pid, read_status) {
+        TerminalHost::GnomeTerminal => read_environ(pid)
+            .as_deref()
+            .and_then(parse_gnome_terminal_tab)
+            .ok_or_else(|| LINUX_FOCUS_UNSUPPORTED.to_string()),
+        TerminalHost::Other(name) => Err(format!(
+            "its terminal ({name}) can't be focused; only GNOME Terminal is supported"
+        )),
+        TerminalHost::Unknown => Err(LINUX_FOCUS_UNSUPPORTED.to_string()),
+    }
 }
 
 /// `gdbus` arguments that bring `tab` to the front: the call GNOME Shell makes when a terminal
@@ -314,11 +402,11 @@ pub fn focus_session(
             host,
         ),
         (Env::Linux, PidDomain::Linux) => {
-            let tab = std::fs::read(format!("/proc/{pid}/environ"))
-                .ok()
-                .as_deref()
-                .and_then(parse_gnome_terminal_tab)
-                .ok_or("focusing a terminal on Linux works only with GNOME Terminal")?;
+            let tab = gnome_terminal_tab(
+                pid,
+                |p| std::fs::read(format!("/proc/{p}/environ")).ok(),
+                |p| std::fs::read_to_string(format!("/proc/{p}/status")).ok(),
+            )?;
             run_gnome_terminal_focus(&tab)
         }
         (host_env, _) => Err(format!(
@@ -491,6 +579,97 @@ mod tests {
         );
         assert_eq!(parse_gnome_terminal_tab(b"TERM=xterm\0"), None);
         assert_eq!(parse_gnome_terminal_tab(b""), None);
+    }
+
+    /// A `/proc/<pid>/status` reader over a `(pid, name, ppid)` process tree.
+    fn status_reader(rows: Vec<(u32, &'static str, u32)>) -> impl Fn(u32) -> Option<String> {
+        move |pid| {
+            rows.iter()
+                .find(|(p, _, _)| *p == pid)
+                .map(|(_, name, ppid)| {
+                    format!("Name:\t{name}\nState:\tS (sleeping)\nPPid:\t{ppid}\n")
+                })
+        }
+    }
+
+    const TAB_ENVIRON: &[u8] =
+        b"GNOME_TERMINAL_SCREEN=/org/gnome/Terminal/screen/ab_cd\0GNOME_TERMINAL_SERVICE=:1.102\0";
+
+    #[test]
+    fn a_session_running_in_a_tab_is_focused_by_its_own_id() {
+        // claude <- zsh <- the terminal server, whose /proc `Name` the kernel truncates at 15.
+        let proc = status_reader(vec![
+            (100, "claude", 90),
+            (90, "zsh", 3306),
+            (3306, "gnome-terminal-", 1),
+            (1, "systemd", 0),
+        ]);
+        assert_eq!(terminal_host(100, &proc), TerminalHost::GnomeTerminal);
+        assert_eq!(
+            gnome_terminal_tab(100, |_| Some(TAB_ENVIRON.to_vec()), &proc),
+            Ok(GnomeTerminalTab {
+                service: Some(":1.102".into()),
+                id: "ab-cd".into(),
+            })
+        );
+        // An untruncated name counts too, in case a kernel ever hands one over.
+        let untruncated = status_reader(vec![(100, "gnome-terminal-server", 1)]);
+        assert_eq!(
+            terminal_host(100, &untruncated),
+            TerminalHost::GnomeTerminal
+        );
+    }
+
+    #[test]
+    fn a_tab_id_inherited_by_another_apps_terminal_is_not_trusted() {
+        // VS Code launched from a tab passes GNOME_TERMINAL_SCREEN to its integrated terminals,
+        // so the id is real but names a tab this session isn't in -- focusing it would raise that
+        // unrelated tab. No terminal server in the chain, so the id is refused.
+        // Named after the app, not the shell between them and not init at the top: VS Code's
+        // own chain puts its extension host in the middle, which is no more use to say than
+        // `bash` would be.
+        let proc = status_reader(vec![
+            (200, "claude", 190),
+            (190, "node-MainThread", 185),
+            (185, "zsh", 180),
+            (180, "code", 170),
+            (170, "code", 1),
+            (1, "systemd", 0),
+        ]);
+        assert_eq!(
+            terminal_host(200, &proc),
+            TerminalHost::Other("code".into())
+        );
+        assert_eq!(
+            gnome_terminal_tab(200, |_| Some(TAB_ENVIRON.to_vec()), &proc),
+            Err("its terminal (code) can't be focused; only GNOME Terminal is supported".into())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_or_cyclic_process_chain_is_refused_without_looping() {
+        // Nothing to read: the process is gone, and nothing can be said about its terminal.
+        assert_eq!(terminal_host(1, |_| None), TerminalHost::Unknown);
+        assert_eq!(
+            gnome_terminal_tab(1, |_| Some(TAB_ENVIRON.to_vec()), |_| None),
+            Err(LINUX_FOCUS_UNSUPPORTED.into())
+        );
+        // Its own parent, and a two-process cycle: both end rather than spin, and neither is
+        // mistaken for a tab.
+        let itself = status_reader(vec![(5, "zsh", 5)]);
+        assert_eq!(terminal_host(5, &itself), TerminalHost::Unknown);
+        let cycle = status_reader(vec![(5, "zsh", 6), (6, "zsh", 5)]);
+        assert_ne!(terminal_host(5, &cycle), TerminalHost::GnomeTerminal);
+        // In a tab, but with no tab id to act on.
+        let in_tab = status_reader(vec![(100, "gnome-terminal-", 1)]);
+        assert_eq!(
+            gnome_terminal_tab(100, |_| Some(b"TERM=xterm\0".to_vec()), &in_tab),
+            Err(LINUX_FOCUS_UNSUPPORTED.into())
+        );
+        assert_eq!(
+            gnome_terminal_tab(100, |_| None, &in_tab),
+            Err(LINUX_FOCUS_UNSUPPORTED.into())
+        );
     }
 
     #[test]

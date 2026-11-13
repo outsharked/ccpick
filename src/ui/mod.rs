@@ -106,16 +106,7 @@ fn event_loop(
                     ),
                     None => Err("no process model for this environment".into()),
                 };
-                // Success clears the status; when no terminal can be found, fall back to
-                // reporting that the session is running.
-                app.status = match result {
-                    Ok(message) if message.is_empty() => None,
-                    Ok(message) => Some(message),
-                    Err(error) => Some(format!(
-                        "running in {} (pid {pid}) — {error}",
-                        app.catalog.sources[source].name
-                    )),
-                };
+                app.set_focus_result(pid, source, result);
             }
             Action::Copy(text) => {
                 let result = crate::clipboard::copy(&text, &app.catalog.host);

@@ -56,6 +56,27 @@ pub struct ResumeDialog {
     pub note: Option<String>,
 }
 
+/// An error message as a sentence of its own: capitalized, and stopped.
+fn sentence(error: &str) -> String {
+    let mut out = error.to_string();
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
+}
+
+/// A message the user has to dismiss, drawn over everything else. Used where the status line
+/// is too easy to miss: focusing a session is a deliberate act that visibly does nothing when it
+/// fails, so the reason has to be put in the way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
 /// Preview geometry reported by the renderer each frame, used to clamp scrolling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewMetrics {
@@ -89,6 +110,8 @@ pub struct App {
     pub(crate) preview_layout: Option<super::render::PreviewLayout>,
     pub status: Option<String>,
     pub dialog: Option<ResumeDialog>,
+    /// A modal message awaiting any key.
+    pub notice: Option<Notice>,
     /// Esc asks before quitting, so a stray Esc while typing doesn't drop the session list.
     pub confirm_quit: bool,
     /// A running session the user pressed Enter on twice in a row: asks whether to resume it here
@@ -120,6 +143,7 @@ impl App {
             preview_layout: None,
             status: None,
             dialog: None,
+            notice: None,
             confirm_quit: false,
             resume_prompt: None,
             last_enter: None,
@@ -384,6 +408,29 @@ impl App {
         }
     }
 
+    /// Records what focusing a session did. Success is silent (the terminal is now in front);
+    /// a failure opens a notice, because the window the user expected to see simply isn't there
+    /// and a status line doesn't say why loudly enough.
+    pub fn set_focus_result(&mut self, pid: u32, source: usize, result: Result<String, String>) {
+        match result {
+            Ok(message) if message.is_empty() => self.status = None,
+            Ok(message) => self.status = Some(message),
+            Err(error) => {
+                self.status = None;
+                self.notice = Some(Notice {
+                    title: " Can't focus ".into(),
+                    lines: vec![
+                        format!(
+                            "Running in {} (pid {pid}).",
+                            self.catalog.sources[source].name
+                        ),
+                        sentence(&error),
+                    ],
+                });
+            }
+        }
+    }
+
     fn open_dialog(&mut self, idx: usize) {
         let source = self.launch_source(idx);
         let plan = self.catalog.launch_plan(idx, source);
@@ -503,6 +550,12 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        // A notice is read, not answered: any key closes it and does nothing else, so a stray
+        // keystroke can't quit or resume something by accident.
+        if self.notice.is_some() {
+            self.notice = None;
+            return Action::None;
+        }
         if let Some(idx) = self.resume_prompt {
             return self.handle_resume_prompt_key(key, idx);
         }
@@ -1052,6 +1105,59 @@ mod tests {
             .id
             .clone();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_focused_says_so_in_a_notice() {
+        let mut a = app("");
+        a.status = Some("stale".into());
+        a.set_focus_result(
+            4242,
+            1,
+            Err("its terminal (code) can't be focused; only GNOME Terminal is supported".into()),
+        );
+        let notice = a.notice.clone().expect("a failure opens a notice");
+        assert_eq!(notice.lines[0], "Running in two (pid 4242).");
+        // Shown as its own sentence, not as the fragment the error is.
+        assert_eq!(
+            notice.lines[1],
+            "Its terminal (code) can't be focused; only GNOME Terminal is supported."
+        );
+        // The status line is left out of it, rather than saying the same thing twice.
+        assert_eq!(a.status, None);
+    }
+
+    #[test]
+    fn focusing_a_terminal_that_was_raised_shows_nothing() {
+        let mut a = app("");
+        a.status = Some("stale".into());
+        a.set_focus_result(4242, 1, Ok(String::new()));
+        assert_eq!(a.notice, None);
+        assert_eq!(a.status, None);
+        // A helper that has something to say still says it in the status line.
+        a.set_focus_result(4242, 1, Ok("focusing…".into()));
+        assert_eq!(a.notice, None);
+        assert_eq!(a.status.as_deref(), Some("focusing…"));
+    }
+
+    #[test]
+    fn any_key_closes_a_notice_and_does_nothing_else() {
+        let mut a = app("");
+        a.set_focus_result(4242, 1, Err("nope".into()));
+        // `q` would otherwise be typed into the query, and Enter would resume the selection:
+        // while a notice is up, the key only closes it.
+        assert_eq!(a.handle_key(key(KeyCode::Char('q'))), Action::None);
+        assert_eq!(a.notice, None);
+        assert_eq!(a.query, "");
+        a.set_focus_result(4242, 1, Err("nope".into()));
+        assert_eq!(a.handle_key(key(KeyCode::Enter)), Action::None);
+        assert_eq!(a.notice, None);
+        // Closed, so the next key does its ordinary job again.
+        assert_eq!(
+            a.handle_key(key(KeyCode::Char('q'))),
+            Action::Search("q".into())
+        );
+        assert_eq!(a.query, "q");
     }
 
     #[test]
